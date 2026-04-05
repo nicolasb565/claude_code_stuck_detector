@@ -106,18 +106,31 @@ The real stress test: a 1-character bug in GCC's value numbering pass (`-1U` vs 
 |---|---|---|---|
 | T2 (parallel) | 1537s, 156 tools, 17.5M tokens | 1169s, 111 tools, 14.3M tokens | **Full by 24%** |
 | T3 (parallel) | 867s, 54 tools, 5.7M tokens | 1731s, 142 tools, 21.5M tokens | Stock |
+| v5 (+CLAUDE.md) | — | 1303s, 142 tools, 21.5M tokens | Same as T3 |
 
 **Result: variance dominates signal.** Stock ranged 867-1537s, Full ranged 1169-1731s. The reasoning path (determined by non-deterministic token sampling) matters more than context management at this scale.
 
 Auto-compact fires correctly (8-21 compaction events, 5-10K tokens saved per run). On trial 2, full mode used 18% fewer input tokens and 22% fewer output tokens. But trial 3 went the other way.
 
-### Rewind
+### Model doesn't use the tools
 
-Never triggered across any trial. The model doesn't recognize when it's going in circles. It also never sets `ephemeral: false` to preserve Bash output. Both features need model training to be used effectively.
+Across all trials:
+- **Rewind: 0 calls.** The model never recognizes when it's going in circles.
+- **ephemeral: false: 0 calls.** The model never explicitly preserves Bash output.
+- **CLAUDE.md instructions: ignored.** v5 added detailed instructions in CLAUDE.md with examples of when to use Rewind and ephemeral. The model read them but behavior was identical to runs without CLAUDE.md (same tool counts, same token usage).
+
+The model's agent-mode behavior (tool selection, investigation strategy) is entirely learned from training. System prompts, tool descriptions, and CLAUDE.md instructions do not change these habits. **New tool behaviors require fine-tuning, not prompting.**
 
 ### The real opportunity
 
-These tools would have dramatically more impact on **smaller models** (7-14B) that have smaller context windows, weaker attention over long contexts, and more frequent wrong turns. Fine-tuning via LoRA on an open source model (e.g., Qwen 3.5 Coder) with synthetic context management examples is the natural next step.
+These tools would have dramatically more impact on **smaller models** (7-35B) that have:
+- Smaller context windows where bloat hits harder
+- Weaker attention over long contexts where pruning removes distractors
+- More frequent wrong turns where Rewind would actually trigger
+
+Fine-tuning via LoRA on an open source model (e.g., Qwen 3.5 Coder 35B) with synthetic context management examples is the natural next step. Training data can be generated from Opus transcripts by retroactively labeling ephemeral outputs and backtracking sequences.
+
+Related prior work: [MemGPT](https://arxiv.org/abs/2310.08560) (virtual memory for LLMs), [LATS](https://arxiv.org/abs/2310.04406) (tree search with backtracking), [Reflexion](https://arxiv.org/abs/2303.11366) (self-reflection). None combine model-driven context management + coding agent + fine-tuning.
 
 ## Telemetry
 
