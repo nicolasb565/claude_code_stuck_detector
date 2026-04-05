@@ -98,9 +98,26 @@ Tested on a rate limiter debugging task (3 bugs, 14 tests) and an async refactor
 
 Key insight: **truncating Read/Edit outputs causes the model to re-read files**, wasting more tokens than it saves. Only Bash outputs (test runs, builds, installs) are truly consume-once.
 
+### GCC compiler bug (PR 123310)
+
+The real stress test: a 1-character bug in GCC's value numbering pass (`-1U` vs `-1` in `tree-ssa-sccvn.cc`). Each run involves reading thousands of lines of compiler source, running tree dumps, adding debug prints, rebuilding GCC, and iterating. 54-197 tool calls per run.
+
+| Trial | Stock | Full (v4) | Winner |
+|---|---|---|---|
+| T2 (parallel) | 1537s, 156 tools, 17.5M tokens | 1169s, 111 tools, 14.3M tokens | **Full by 24%** |
+| T3 (parallel) | 867s, 54 tools, 5.7M tokens | 1731s, 142 tools, 21.5M tokens | Stock |
+
+**Result: variance dominates signal.** Stock ranged 867-1537s, Full ranged 1169-1731s. The reasoning path (determined by non-deterministic token sampling) matters more than context management at this scale.
+
+Auto-compact fires correctly (8-21 compaction events, 5-10K tokens saved per run). On trial 2, full mode used 18% fewer input tokens and 22% fewer output tokens. But trial 3 went the other way.
+
 ### Rewind
 
-Not triggered on our test tasks — the model solved them without going down dead ends. Rewind needs genuinely ambiguous multi-turn debugging tasks where the first plausible fix doesn't work.
+Never triggered across any trial. The model doesn't recognize when it's going in circles. It also never sets `ephemeral: false` to preserve Bash output. Both features need model training to be used effectively.
+
+### The real opportunity
+
+These tools would have dramatically more impact on **smaller models** (7-14B) that have smaller context windows, weaker attention over long contexts, and more frequent wrong turns. Fine-tuning via LoRA on an open source model (e.g., Qwen 3.5 Coder) with synthetic context management examples is the natural next step.
 
 ## Telemetry
 
