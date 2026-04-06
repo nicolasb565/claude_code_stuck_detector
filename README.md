@@ -66,11 +66,84 @@ curl http://localhost:8080/stats
 
 ### Stuck Classifier
 
-The stuck detector uses a logistic regression classifier trained on 1,878 labeled thinking-block windows (9 features, `class_weight=balanced`). Inference runs in pure JS — no Python dependency at runtime.
+Logistic regression classifier (15 features, `class_weight=balanced`) that detects circular reasoning in agent thinking blocks. Inference runs in pure JS — no Python dependency at runtime.
 
-Features: `self_sim`, `max_substr_repeat`, `circle_kw`, `false_starts`, `avg_sent_len`, `sent_len_std`, `vocab_diversity`, `code_ratio`, `question_marks`.
+Two categories of features:
 
-A cross-window similarity check (comparing current thinking to the last 3 turns) suppresses false positives: high classifier score + low cross-window similarity means the model is exploring a wrong hypothesis but making progress, so no nudge is injected.
+**Text features** (9) — extracted from the thinking block text:
+`self_sim`, `max_substr_repeat`, `circle_kw`, `false_starts`, `avg_sent_len`, `sent_len_std`, `vocab_diversity`, `code_ratio`, `question_marks`
+
+**Tool-call behavioral features** (6) — extracted from the message history:
+`bash_cmd_repeat` (+1.26), `grep_pattern_repeat` (+1.51), `same_tool_streak` (+1.36), `file_read_repeat` (+0.89), `tool_diversity`, `unique_files_ratio`
+
+Tool features dominate: an agent re-running the same grep with slight variations or re-reading the same file is a stronger stuck signal than any text pattern.
+
+At threshold 0.85: **99% precision, 38% recall, 0 false negatives**. The nudge is a hint the agent can ignore, so zero false negatives is the ideal operating point.
+
+A cross-window similarity check (comparing current thinking to the last 3 turns) provides a secondary gate against false positives.
+
+### Training Data
+
+The classifier is trained on labeled 1000-character windows of agent thinking blocks, collected by running agents on real bugs and feature implementations across diverse codebases. Each window is labeled stuck/productive based on manual review of agent transcripts.
+
+**Training tasks — bugs:**
+
+| Task | Codebase | Bug |
+|---|---|---|
+| [GCC PR 123310](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=123310) | GCC tree-ssa-sccvn.cc | Wrong aggregate copy: `-1U` vs `-1` offset comparison |
+| [GCC PR 123864](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=123864) | GCC match.pd | `__builtin_mul_overflow_p` wrong with unsigned, missing `!TYPE_UNSIGNED` guard |
+| [LLVM #125374](https://github.com/llvm/llvm-project/issues/125374) | LLVM VPlanTransforms.cpp | Loop vectorizer replaces reduction with wrong SCEV live-in |
+| [SQLite forum/86ddb1e](https://sqlite.org/forum/info/86ddb1effebcfa5c) | SQLite optimizer | EXISTS-to-JOIN with UNION returns empty (3.51.0 regression) |
+| [curl CVE-2025-0665](https://curl.se/docs/CVE-2025-0665.html) | curl connect.c | eventfd double close on threaded resolver teardown |
+| [Django #36109](https://code.djangoproject.com/ticket/36109) | Django ORM query.py | Chained FilteredRelation causes RecursionError |
+| [Express v5.2.0](https://github.com/expressjs/express/releases/tag/v5.2.1) | Express.js | Query parser returns null-prototype object, breaks `hasOwnProperty` |
+| [Linux xHCI](https://bbs.archlinux.org/viewtopic.php?id=303879) | Linux xhci-ring.c | Link TRB cycle bit not cleared on suspend/resume |
+| [Linux btrfs](https://lists.debian.org/debian-kernel/2025/08/msg00125.html) | Linux tree-log.c | Log replay fails for 0-link inodes with extents |
+| [LAPACK #1138](https://github.com/Reference-LAPACK/lapack/issues/1138) | LAPACK dlasd7.f | SVD convergence failure from ordering bug in divide-and-conquer ([fix](https://github.com/Reference-LAPACK/lapack/pull/1140)) |
+| [Boost.Beast #3028](https://github.com/boostorg/beast/issues/3028) | Boost Beast websocket | permessage-deflate corruption with small read buffers ([fix](https://github.com/boostorg/beast/pull/3029)) |
+
+**Training tasks — features:**
+
+| Task | Codebase | Feature |
+|---|---|---|
+| [LAPACK #1155](https://github.com/Reference-LAPACK/lapack/pull/1155) | LAPACK BLAS | Skew-symmetric matrix subroutines (DSKEWSYMV, DSKEWSYR2, DSKEWSYMM, DSKEWSYR2K) |
+| [Boost.Geometry #1409](https://github.com/boostorg/geometry/pull/1409) | Boost Geometry | `is_valid` algorithm for 3D polyhedral surfaces |
+
+**Training tasks — synthetic algorithms:**
+
+| Task | Bug |
+|---|---|
+| Red-black tree | Wrong color assignment in deletion fixup mirror case |
+| A* pathfinding | Inadmissible heuristic (average weight instead of minimum) |
+| Raft consensus | Fixed election timeout causes split vote deadlock |
+
+**Stuck patterns observed:**
+- **Hypothesis cycling** — repeating the same theory with minor variations (GCC match.pd, 11 blocks)
+- **Grep broadening spiral** — 12+ regex variations searching for code that doesn't exist (LLVM, 36 blocks)
+- **Can't-reproduce loop** — tests pass but problem statement says there's a bug (RBTree, 7 blocks)
+- **Wrong-version search** — searching for code in a refactored codebase (curl, 23 blocks)
+
+### Training Pipeline
+
+```
+1. Run agents on tasks (run_all_tasks.sh)
+   └── Proxy with STUCK_ENABLED=0 so agents behave naturally
+
+2. Extract thinking blocks from transcripts
+   └── *_thinking.json per task
+
+3. Review transcripts for stuck episodes
+   └── Manual or agent-assisted labeling
+
+4. Window into 1000-char chunks, label stuck/productive
+   └── labeled_windows.json
+
+5. Train: python3 train.py --balanced --tool-features
+   └── stuck_classifier.pkl
+
+6. Export: python3 export_model.py
+   └── model_weights.json (loaded by classify.mjs at runtime)
+```
 
 ## Benchmark: GCC Compiler Bug (PR 123310)
 
@@ -90,6 +163,8 @@ Tested on [GCC PR 123310](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=123310) �
 
 4. **Variance dominates.** Same task, same model: 219s to 1731s range across trials. Non-deterministic token sampling determines the reasoning path.
 
+5. **Tool-call features beat text features.** An agent re-running the same grep or re-reading the same file is a much stronger stuck signal than keyword counting or vocabulary analysis in the thinking text.
+
 ## Related Work
 
 - [MemGPT](https://arxiv.org/abs/2310.08560) — Virtual memory paging for LLMs
@@ -100,8 +175,8 @@ Tested on [GCC PR 123310](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=123310) �
 
 ## Next Steps
 
-1. Add cross-window similarity as a training feature in the classifier
-2. Collect more stuck samples to improve precision
+1. Collect more training data from diverse codebases (LAPACK, Boost, React)
+2. Evaluate classifier precision/recall on held-out tasks
 3. LoRA fine-tune an open source model (Qwen 3.5 Coder) on context management behaviors
 4. Benchmark on SWE-bench with the proxy
 
