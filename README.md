@@ -62,7 +62,6 @@ curl http://localhost:8080/stats
 | `STUCK_ENABLED` | `1` | Stuck detection |
 | `STUCK_THRESHOLD` | `0.85` | Classifier confidence threshold |
 | `STUCK_COOLDOWN` | `5` | Turns between nudges |
-| `STUCK_CROSS_WINDOW_THRESHOLD` | `0.5` | Cross-window similarity threshold |
 
 ### Stuck Classifier
 
