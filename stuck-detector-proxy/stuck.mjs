@@ -1,14 +1,104 @@
 /**
  * Stuck detection: analyze thinking blocks for circular reasoning.
+ * Uses a trained classifier (TF-IDF features + LogReg) via Python subprocess,
+ * with heuristic fallback if classifier unavailable.
  * When detected, inject a corrective nudge into the messages.
  */
 
+import { execSync } from "child_process";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const CLASSIFY_SCRIPT = join(__dirname, "classify.py");
+const PYTHON = process.env.STUCK_PYTHON || "/home/nicolas/source/classifier-repos/venv/bin/python3";
+
 let lastNudgeTurn = -999;
 let turnCounter = 0;
+let classifierAvailable = null; // null = untested
 
 export function resetState() {
   lastNudgeTurn = -999;
   turnCounter = 0;
+}
+
+/**
+ * Call the trained classifier via Python subprocess.
+ * Returns {score, label, reasons} or null if unavailable.
+ */
+function callClassifier(text) {
+  if (classifierAvailable === false) return null;
+
+  try {
+    const result = execSync(`${PYTHON} "${CLASSIFY_SCRIPT}"`, {
+      input: text,
+      timeout: 5000,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const parsed = JSON.parse(result.trim());
+    if (classifierAvailable === null) {
+      classifierAvailable = true;
+      console.log("[stuck-detector] Classifier loaded successfully");
+    }
+    return parsed;
+  } catch (e) {
+    if (classifierAvailable === null) {
+      classifierAvailable = false;
+      console.log(`[stuck-detector] Classifier unavailable, using heuristic fallback: ${e.message}`);
+    }
+    return null;
+  }
+}
+
+/**
+ * Heuristic fallback when classifier is unavailable.
+ */
+function heuristicCheck(text) {
+  let score = 0;
+  const reasons = [];
+
+  // Repeated substrings
+  const seen = {};
+  for (let i = 0; i < text.length - 20; i += 10) {
+    const sub = text.substring(i, i + 20);
+    seen[sub] = (seen[sub] || 0) + 1;
+    if (seen[sub] >= 3) {
+      score += 0.4;
+      reasons.push("repeated_substring");
+      break;
+    }
+  }
+
+  // Circle keywords
+  const matches = text.match(
+    /\b(try again|let me try|another approach|actually,|wait,|hmm|let me reconsider|that didn't work|same error|still failing)\b/gi,
+  );
+  if (matches && matches.length >= 5) {
+    score += 0.3;
+    reasons.push(`circle_kw(${matches.length})`);
+  }
+
+  // Self-similarity
+  if (text.length > 2000) {
+    const half = Math.floor(text.length / 2);
+    const words1 = new Set(
+      text.slice(0, half).toLowerCase().split(/\s+/).filter((w) => w.length > 4),
+    );
+    const words2 = text.slice(half).toLowerCase().split(/\s+/).filter((w) => w.length > 4);
+    let overlap = 0;
+    for (const w of words2) if (words1.has(w)) overlap++;
+    if (words2.length > 0 && overlap / words2.length > 0.6) {
+      score += 0.3;
+      reasons.push("high_overlap");
+    }
+  }
+
+  return {
+    score,
+    label: score >= 0.5 ? "stuck" : "productive",
+    reasons,
+  };
 }
 
 export function pruneIfStuck(messages, log) {
@@ -38,17 +128,27 @@ export function pruneIfStuck(messages, log) {
 
   if (thinking.length < 500) return messages;
 
-  // Run heuristic
-  if (!isThinkingSuspicious(thinking)) return messages;
+  // Try classifier first, fall back to heuristic
+  const threshold = parseFloat(process.env.STUCK_THRESHOLD || "0.5");
+  let result = callClassifier(thinking);
+  if (!result) {
+    result = heuristicCheck(thinking);
+  }
 
-  log?.("stuck_heuristic_triggered", {
+  if (result.score < threshold) return messages;
+
+  log?.("stuck_detected", {
     turnCount: turnCounter,
     thinkingLength: thinking.length,
+    score: result.score,
+    label: result.label,
+    reasons: result.reasons,
+    method: classifierAvailable ? "classifier" : "heuristic",
   });
 
   lastNudgeTurn = turnCounter;
 
-  // Build summary of recent tool calls for context
+  // Build recent tool call summary
   const recentTools = [];
   for (const msg of messages.slice(-20)) {
     if (!Array.isArray(msg.content)) continue;
@@ -61,14 +161,13 @@ export function pruneIfStuck(messages, log) {
     }
   }
 
-  // Inject nudge as a user message
   const nudge = {
     role: "user",
     content: [
       {
         type: "text",
         text:
-          `[CONTEXT MONITOR — turn ${turnCounter}]\n\n` +
+          `[CONTEXT MONITOR — turn ${turnCounter}, confidence ${(result.score * 100).toFixed(0)}%]\n\n` +
           `Your recent thinking shows signs of repeated reasoning patterns. ` +
           `You may be going in circles.\n\n` +
           `Recent tool calls:\n  ${recentTools.slice(-8).join("\n  ")}\n\n` +
@@ -84,46 +183,10 @@ export function pruneIfStuck(messages, log) {
 
   log?.("stuck_nudge_injected", {
     turnCount: turnCounter,
+    score: result.score,
+    method: classifierAvailable ? "classifier" : "heuristic",
     recentTools: recentTools.slice(-5),
   });
 
   return [...messages, nudge];
-}
-
-function isThinkingSuspicious(text) {
-  // 1. Repeated 20-char substrings appearing 3+ times
-  const seen = {};
-  for (let i = 0; i < text.length - 20; i += 10) {
-    const sub = text.substring(i, i + 20);
-    seen[sub] = (seen[sub] || 0) + 1;
-    if (seen[sub] >= 3) return true;
-  }
-
-  // 2. Circle keywords frequency
-  const matches = text.match(
-    /\b(try again|let me try|another approach|actually,|wait,|hmm|let me reconsider|that didn't work|same error|still failing)\b/gi,
-  );
-  if (matches && matches.length >= 5) return true;
-
-  // 3. High word overlap between first half and second half
-  if (text.length > 2000) {
-    const half = Math.floor(text.length / 2);
-    const words1 = new Set(
-      text
-        .slice(0, half)
-        .toLowerCase()
-        .split(/\s+/)
-        .filter((w) => w.length > 4),
-    );
-    const words2 = text
-      .slice(half)
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 4);
-    let overlap = 0;
-    for (const w of words2) if (words1.has(w)) overlap++;
-    if (words2.length > 0 && overlap / words2.length > 0.6) return true;
-  }
-
-  return false;
 }
