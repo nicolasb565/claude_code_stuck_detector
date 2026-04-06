@@ -77,7 +77,7 @@ Two categories of features:
 
 Tool features dominate: an agent re-running the same grep with slight variations or re-reading the same file is a stronger stuck signal than any text pattern.
 
-At threshold 0.85: **99% precision, 38% recall, 0 false negatives**. The nudge is a hint the agent can ignore, so zero false negatives is the ideal operating point.
+At threshold 0.85: **99% precision, 38% recall** (trained on 212 windows from 10 tasks). Precision is prioritized — the nudge is a soft hint the agent can ignore, so false positives are cheap while false negatives just mean a missed nudge opportunity. More training data will improve recall.
 
 A cross-window similarity check (comparing current thinking to the last 3 turns) provides a secondary gate against false positives.
 
