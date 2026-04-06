@@ -7,12 +7,32 @@
 
 import { classify } from "./classify.mjs";
 
-let lastNudgeTurn = -999;
-let turnCounter = 0;
+// Per-session state keyed by a hash of the first user message.
+// Each concurrent agent gets its own turn counter and cooldown.
+const sessions = new Map();
+
+function getSession(messages) {
+  // Derive session key from the first user message content
+  let key = "";
+  for (const msg of messages) {
+    if (msg.role === "user") {
+      const text = Array.isArray(msg.content)
+        ? msg.content.map(b => b.text || "").join("")
+        : String(msg.content);
+      key = text.slice(0, 200);
+      break;
+    }
+  }
+  if (!key) key = "__default__";
+
+  if (!sessions.has(key)) {
+    sessions.set(key, { turnCounter: 0, lastNudgeTurn: -999 });
+  }
+  return sessions.get(key);
+}
 
 export function resetState() {
-  lastNudgeTurn = -999;
-  turnCounter = 0;
+  sessions.clear();
 }
 
 /**
@@ -119,9 +139,10 @@ function extractToolFeatures(messages, windowSize = 20) {
 }
 
 export function pruneIfStuck(messages, log) {
-  turnCounter++;
+  const session = getSession(messages);
+  session.turnCounter++;
   const cooldown = parseInt(process.env.STUCK_COOLDOWN || "5", 10);
-  if (turnCounter - lastNudgeTurn < cooldown) return messages;
+  if (session.turnCounter - session.lastNudgeTurn < cooldown) return messages;
 
   // Extract thinking from the last assistant message
   let lastAssistantIdx = -1;
@@ -155,7 +176,7 @@ export function pruneIfStuck(messages, log) {
   if (result.score < threshold) return messages;
 
   log?.("stuck_detected", {
-    turnCount: turnCounter,
+    turnCount: session.turnCounter,
     thinkingLength: thinking.length,
     score: result.score,
     label: result.label,
@@ -163,7 +184,7 @@ export function pruneIfStuck(messages, log) {
     toolFeats,
   });
 
-  lastNudgeTurn = turnCounter;
+  session.lastNudgeTurn = session.turnCounter;
 
   // Build recent tool call summary
   const recentTools = [];
@@ -184,7 +205,7 @@ export function pruneIfStuck(messages, log) {
       {
         type: "text",
         text:
-          `[CONTEXT MONITOR — turn ${turnCounter}, confidence ${(result.score * 100).toFixed(0)}%]\n\n` +
+          `[CONTEXT MONITOR — turn ${session.turnCounter}, confidence ${(result.score * 100).toFixed(0)}%]\n\n` +
           `Your recent thinking shows signs of repeated reasoning patterns. ` +
           `You may be going in circles.\n\n` +
           `Recent tool calls:\n  ${recentTools.slice(-8).join("\n  ")}\n\n` +
@@ -199,7 +220,7 @@ export function pruneIfStuck(messages, log) {
   };
 
   log?.("stuck_nudge_injected", {
-    turnCount: turnCounter,
+    turnCount: session.turnCounter,
     score: result.score,
     method: "classifier",
     recentTools: recentTools.slice(-5),
