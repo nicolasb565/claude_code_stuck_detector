@@ -81,9 +81,10 @@ Trained on 151 windows with full tool-call data from 17 tasks (80 stuck, 71 prod
 
 | Threshold | Precision | Recall | FP | FN |
 |---|---|---|---|---|
-| 0.50 | 79% | 100% | 25 | 0 |
+| 0.70 | 81% | 99% | 22 | 1 |
+| 0.75 | 83% | 98% | 19 | 2 |
+| **0.80** | **85%** | **98%** | **17** | **2** |
 | 0.85 | 85% | 96% | 16 | 4 |
-| 0.95 | 91% | 90% | 9 | 10 |
 
 ### Training Data
 
