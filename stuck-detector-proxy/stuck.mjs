@@ -145,34 +145,6 @@ export function pruneIfStuck(messages, log) {
 
   if (thinking.length < 500) return messages;
 
-  // Extract thinking from previous assistant messages for cross-window comparison
-  const prevThinkings = [];
-  for (let i = lastAssistantIdx - 1; i >= 0; i--) {
-    if (messages[i].role !== "assistant" || !Array.isArray(messages[i].content)) continue;
-    let prevThinking = "";
-    for (const block of messages[i].content) {
-      if (block.type === "thinking" && block.thinking) prevThinking += block.thinking;
-    }
-    if (prevThinking.length > 200) {
-      prevThinkings.push(prevThinking);
-      if (prevThinkings.length >= 3) break; // last 3 thinking blocks
-    }
-  }
-
-  // Cross-window similarity: compare current thinking to recent previous ones
-  let crossWindowScore = 0;
-  if (prevThinkings.length > 0) {
-    const currWords = new Set(thinking.toLowerCase().split(/\s+/).filter(w => w.length > 4));
-    for (const prev of prevThinkings) {
-      const prevWords = prev.toLowerCase().split(/\s+/).filter(w => w.length > 4);
-      if (prevWords.length === 0) continue;
-      let overlap = 0;
-      for (const w of prevWords) if (currWords.has(w)) overlap++;
-      const sim = overlap / prevWords.length;
-      crossWindowScore = Math.max(crossWindowScore, sim);
-    }
-  }
-
   // Extract tool-call behavioral features
   const toolFeats = extractToolFeatures(messages);
 
@@ -180,33 +152,15 @@ export function pruneIfStuck(messages, log) {
   const threshold = parseFloat(process.env.STUCK_THRESHOLD || "0.85");
   const result = classify(thinking, toolFeats);
 
-  // Combine classifier score with cross-window similarity.
-  // High classifier score + low cross-window = wrong hypothesis but new ground (don't nudge)
-  // High classifier score + high cross-window = genuinely stuck (nudge)
-  const crossWindowThreshold = parseFloat(process.env.STUCK_CROSS_WINDOW_THRESHOLD || "0.5");
-  const combinedStuck = result.score >= threshold &&
-    (prevThinkings.length === 0 || crossWindowScore >= crossWindowThreshold);
-
-  if (!combinedStuck) {
-    if (result.score >= threshold) {
-      log?.("stuck_suppressed", {
-        turnCount: turnCounter,
-        classifierScore: result.score,
-        crossWindowScore: Math.round(crossWindowScore * 100) / 100,
-        reason: "low cross-window similarity — likely wrong hypothesis but progressing",
-      });
-    }
-    return messages;
-  }
+  if (result.score < threshold) return messages;
 
   log?.("stuck_detected", {
     turnCount: turnCounter,
     thinkingLength: thinking.length,
     score: result.score,
-    crossWindowScore: Math.round(crossWindowScore * 100) / 100,
     label: result.label,
     reasons: result.reasons,
-    method: "classifier",
+    toolFeats,
   });
 
   lastNudgeTurn = turnCounter;
