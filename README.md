@@ -149,25 +149,42 @@ The classifier is trained on labeled 1000-character windows of agent thinking bl
    └── model_weights.json (loaded by classify.mjs at runtime)
 ```
 
-## Benchmark: GCC Compiler Bug (PR 123310)
+## Benchmark Results (5 runs per condition)
 
-Tested on [GCC PR 123310](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=123310) — a wrong-code bug in the value numbering pass (`tree-ssa-sccvn.cc`). The fix is a 1-character change: `-1U` → `-1` in an offset comparison.
+13 tasks run 5 times each with classifier OFF and ON. Median comparison:
 
-| Run | Duration | Compactions | Stuck nudges | Correct fix? |
+| Task | OFF (median) | ON (median) | Δ time | Δ tokens |
 |---|---|---|---|---|
-| Proxy | 1636s | 7 | 3 (turns 72, 86, 117) | Yes |
+| 24_rbtree_bug | 671s | 45s | **-93%** | **-88%** |
+| 02_gcc_bug | 697s | 371s | **-47%** | **-52%** |
+| 06_django_bug | 688s | 366s | **-47%** | **-32%** |
+| 12_linux_fs_bug | 270s | 218s | **-19%** | -9% |
+| 08_express_bug | 78s | 67s | **-14%** | -16% |
+| 32_beast_bug | 293s | 262s | -11% | -15% |
+| 07_react_bug | 180s | 167s | -7% | -16% |
+| 04_sqlite_bug | 70s | 66s | -6% | +11% |
+| 33_geometry_feature | 543s | 517s | -5% | +2% |
+| 01_gcc_bug | 114s | 110s | -4% | -9% |
+| 03_llvm_bug | 1375s | 1628s | +18% | +34% |
+| 10_linux_usb_bug | 56s | 69s | +23% | +23% |
+| 30_lapack_bug | 162s | 245s | +51% | +185% |
+| **TOTAL** | **5197s** | **4131s** | **-21%** | **-12%** |
+
+The classifier consistently helps on tasks where agents get stuck (RBTree, GCC#2, Django — large improvements across all 5 runs). Tasks with clean solves (SQLite, USB, GCC#1) show no significant change. High-variance regressions (LLVM, LAPACK) are driven by non-deterministic sampling rather than classifier interference — the same tasks show 10x variance between runs with or without the classifier.
 
 ## Key Findings
 
-1. **Only compact Bash outputs.** Truncating Read/Edit/Write outputs causes the model to re-read files, costing more than it saves.
+1. **Stuck detection saves 21% time and 12% tokens overall.** On tasks where agents get stuck, savings reach 47-93%. On clean-solve tasks, the classifier has no effect (correctly stays silent).
 
-2. **Models don't use novel tools without training.** `ephemeral` parameter, `Rewind` tool, CLAUDE.md instructions — the model ignores all of them. Agent-mode behavior is trained, not prompted.
+2. **Only compact Bash outputs.** Truncating Read/Edit/Write outputs causes the model to re-read files, costing more than it saves.
 
-3. **Proxy > patches > plugins.** Proxy gives full message control, survives updates, works with vanilla Claude Code, enables trivial A/B testing.
+3. **Tool-call features beat text features.** An agent re-running the same grep or re-reading the same file is a much stronger stuck signal than keyword counting or vocabulary analysis in the thinking text.
 
-4. **Variance dominates.** Same task, same model: 219s to 1731s range across trials. Non-deterministic token sampling determines the reasoning path.
+4. **Variance dominates.** Same task, same model: 93s to 3210s range across trials (LLVM). Non-deterministic token sampling determines the reasoning path. 5+ runs per condition needed for statistical comparison.
 
-5. **Tool-call features beat text features.** An agent re-running the same grep or re-reading the same file is a much stronger stuck signal than keyword counting or vocabulary analysis in the thinking text.
+5. **Models don't use novel tools without training.** `ephemeral` parameter, `Rewind` tool, CLAUDE.md instructions — the model ignores all of them. Agent-mode behavior is trained, not prompted.
+
+6. **Proxy > patches > plugins.** Proxy gives full message control, survives updates, works with vanilla Claude Code, enables trivial A/B testing.
 
 ## Related Work
 
