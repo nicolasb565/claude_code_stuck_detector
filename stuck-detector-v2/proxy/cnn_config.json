@@ -1,5 +1,5 @@
 {
-  "threshold": 0.60,
+  "threshold": 0.35,
   "model_stage": 1,
   "total_params": 3133,
   "metrics": {
