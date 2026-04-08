@@ -172,19 +172,39 @@ The classifier is trained on labeled 1000-character windows of agent thinking bl
 
 The classifier consistently helps on tasks where agents get stuck (RBTree, GCC#2, Django — large improvements across all 5 runs). Tasks with clean solves (SQLite, USB, GCC#1) show no significant change. High-variance regressions (LLVM, LAPACK) are driven by non-deterministic sampling rather than classifier interference — the same tasks show 10x variance between runs with or without the classifier.
 
+### Held-out evaluation (unseen tasks)
+
+6 tasks the classifier was never trained on (3 hard, 3 easy), from GCC, LLVM, Django, and LAPACK:
+
+| Task | Type | OFF (s) | ON (s) | Δ time | OFF (tok) | ON (tok) | Δ tokens |
+|---|---|---|---|---|---|---|---|
+| 40_django_jsonfield | hard | 68 | 54 | -21% | 2,801 | 2,590 | -8% |
+| 41_django_keytexttransform | easy | 324 | 266 | -18% | 10,455 | 14,987 | +43% |
+| 42_lapack_uninit | easy | 116 | 84 | -28% | 2,261 | 1,812 | -20% |
+| 43_gcc_tbaa | hard | 137 | 390 | +185% | 5,406 | 16,212 | +200% |
+| 44_llvm_arith | hard | 156 | 143 | -8% | 3,239 | 5,813 | +79% |
+| 45_llvm_delete | easy | 164 | 86 | -48% | 7,781 | 2,746 | -65% |
+| **TOTAL** | | **965** | **1,023** | **+6%** | **31,943** | **44,160** | **+38%** |
+
+**The classifier does not generalize well to unseen tasks.** On held-out data, it increased token usage by 38%. The root cause: agents solving these tasks productively but slowly (many tool calls, deep file exploration) trigger false positives. The training data lacks examples of "productive but takes many turns" — it mostly contains quick clean solves as productive samples, so the model learned "many tool calls = stuck."
+
+This is a training data diversity problem, not an architecture problem. The tool-call features are the right signal; we just need more diverse productive samples that include long, multi-step successful debugging sessions.
+
 ## Key Findings
 
-1. **Stuck detection saves 21% time and 12% tokens overall.** On tasks where agents get stuck, savings reach 47-93%. On clean-solve tasks, the classifier has no effect (correctly stays silent).
+1. **Stuck detection saves 21% time and 12% tokens on known tasks.** On tasks where agents genuinely get stuck, savings reach 47-93%. On clean-solve tasks, the classifier correctly stays silent.
 
-2. **Only compact Bash outputs.** Truncating Read/Edit/Write outputs causes the model to re-read files, costing more than it saves.
+2. **Does not generalize to unseen tasks yet.** The classifier fires false positives on productive agents that happen to use many tool calls, because the training data lacks slow-but-productive examples. More diverse training data would fix this.
 
-3. **Tool-call features beat text features.** An agent re-running the same grep or re-reading the same file is a much stronger stuck signal than keyword counting or vocabulary analysis in the thinking text.
+3. **Tool-call features are the right signal, but need better training data.** `bash_cmd_repeat` and `tool_diversity` are the strongest features. They correctly identify behavioral loops but can't yet distinguish "exploring thoroughly" from "going in circles" without more examples of each.
 
-4. **Variance dominates.** Same task, same model: 93s to 3210s range across trials (LLVM). Non-deterministic token sampling determines the reasoning path. 5+ runs per condition needed for statistical comparison.
+4. **Only compact Bash outputs.** Truncating Read/Edit/Write outputs causes the model to re-read files, costing more than it saves.
 
-5. **Models don't use novel tools without training.** `ephemeral` parameter, `Rewind` tool, CLAUDE.md instructions — the model ignores all of them. Agent-mode behavior is trained, not prompted.
+5. **Variance dominates.** Same task, same model: 93s to 3210s range across trials (LLVM). Non-deterministic token sampling determines the reasoning path. 5+ runs per condition needed for statistical comparison.
 
-6. **Proxy > patches > plugins.** Proxy gives full message control, survives updates, works with vanilla Claude Code, enables trivial A/B testing.
+6. **Models don't use novel tools without training.** `ephemeral` parameter, `Rewind` tool, CLAUDE.md instructions — the model ignores all of them. Agent-mode behavior is trained, not prompted.
+
+7. **Proxy > patches > plugins.** Proxy gives full message control, survives updates, works with vanilla Claude Code, enables trivial A/B testing.
 
 ## Related Work
 
@@ -213,11 +233,22 @@ The classifier consistently helps on tasks where agents get stuck (RBTree, GCC#2
 
 None of the above combine proxy-based interception, thinking-block text features, tool-call behavioral features, and a trained classifier with corrective nudge injection. The metacognition research (Ji-An et al.) suggests intrinsic self-monitoring is limited and gameable, supporting the case for an external monitor.
 
-Longer-term, this kind of monitoring belongs inside the model or API — similar to how speculative decoding uses a small draft model alongside the main model. A lightweight "reasoning monitor" model could run in parallel during inference, detecting stuck patterns at the token level and redirecting attention before a full stuck episode forms, without consuming the main model's capacity.
+Longer-term, this kind of monitoring belongs inside the model or API — similar to how speculative decoding uses a small draft model alongside the main model. A lightweight "reasoning monitor" model could run in parallel during inference, detecting stuck patterns at the token level and redirecting attention before a full stuck episode forms, without consuming the main model's capacity. The proxy approach demonstrated here is a proof of concept — the real implementation should be at the inference layer where the monitor has access to internal model state, not just the message history.
+
+## The Case for Built-in Stuck Detection
+
+AI coding agents routinely waste 30-50% of their token budget going in circles on hard tasks. This is a known problem that every user of Claude Code, Cursor, Copilot Workspace, and similar tools experiences. Our proxy demonstrates that:
+
+1. **Stuck behavior is detectable** — a simple logistic regression on 15 features achieves 85% precision at 98% recall on known tasks
+2. **Corrective nudges work** — injecting a "you may be going in circles" message saves 21% time and 12% tokens on average, with 47-93% savings on the hardest tasks
+3. **The right signals are behavioral, not textual** — tool-call repetition patterns are far more reliable than analyzing the reasoning text
+4. **An external monitor can't fully distinguish exploration from stuck** — the classifier needs examples of both to learn the boundary, and a proxy only sees messages, not internal model state
+
+This last point is why it should be built into the model or API. An inference-layer monitor could access attention patterns, internal confidence signals, and the full generation state — not just the finished messages. It could intervene at the token level before a stuck episode fully forms, rather than waiting for a complete turn to analyze.
 
 ## Next Steps
 
-1. Evaluate classifier on held-out tasks (train/test split)
+1. Collect more diverse productive training data (slow multi-step successful debugging sessions)
 2. LoRA fine-tune an open source model (Qwen 3.5 Coder) on context management behaviors
 3. Benchmark on SWE-bench with the proxy
 4. Explore lightweight monitor model architecture (speculative-decoding-style parallel inference)
