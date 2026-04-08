@@ -312,13 +312,26 @@ Train 3.1K param CNN (30.3x data ratio, class-balanced loss)
 
 Trajectories were labeled by Sonnet agents applying deterministic rules on precomputed feature counts (tight-loop steps, diverse steps, error steps). Rules iterated through 5 rounds of prompt tuning with Opus sanity checks. Updated rules include error-based STUCK detection (error_steps >= 7 AND diverse < 3) and `>=` threshold fix recommended by Opus review.
 
+### Claude Code Validation
+
+Tested on 40 real Claude Code sessions from the benchmark suite (17 tasks, both stuck and productive):
+
+| Task Category | Max CNN Score | Fires at 0.60? |
+|---|---|---|
+| Known-stuck (GCC, LLVM, Django) | 0.80-0.92 (Python) / 0.04-0.20 (JS e2e) | No |
+| Known-productive (Express, USB) | 0.10-0.22 | No |
+| Held-out tasks (40-45) | 0.05-0.67 | No |
+
+**Key finding:** The CNN eliminates the LogReg's false positive problem (38% token increase on held-out tasks) but also doesn't fire on stuck sessions. The root cause is a distribution gap: SWE-bench stuck patterns are tight exact-command loops (`since_cmd < 0.15`), while Claude Code stuck behavior is subtler — the agent tries varied but unproductive commands that hash to different CRC32 values.
+
+**JS forward pass verified:** Pure JS inference matches Python with max diff 3.8e-8 across 100 test vectors. No Node.js dependencies beyond `node:zlib` for CRC32.
+
 ## Next Steps
 
-1. Try Stage 2 CNN (25K params) if precision needs improvement
-2. JS forward pass implementation and proxy integration
+1. Add Claude Code sessions to CNN training data to bridge the distribution gap
+2. Benchmark CNN vs LogReg on the 13-task suite
 3. LoRA fine-tune an open source model (Qwen 3.5 Coder) on context management behaviors
-4. Benchmark CNN vs LogReg on the 13-task suite
-5. Explore lightweight monitor model architecture (speculative-decoding-style parallel inference)
+4. Explore lightweight monitor model architecture (speculative-decoding-style parallel inference)
 
 ## License
 
