@@ -275,27 +275,15 @@ Window into 118K 10-step chunks (stride 5)
 Train 3.1K param CNN (30.3x data ratio, class-balanced loss)
 ```
 
-### Results
+### Results (SWE-bench test set)
 
 | Metric | Value |
 |---|---|
-| Precision (at recall >= 70%) | 77.3% |
-| Recall | 77.9% |
-| F1 | 0.776 |
-| Threshold | 0.94 |
+| Precision (at t=0.60) | 59.6% |
+| Recall | 89.2% |
+| F1 | 0.72 |
+| Threshold | 0.60 |
 | Weights size | 68 KB JSON |
-
-### Feature Importance (ablation)
-
-| Feature | Impact when removed |
-|---|---|
-| `output_length` | -5.0% (critical) |
-| `steps_since_same_cmd` | -4.9% (critical) |
-| `thinking_length` | -4.0% (critical) |
-| `tool_count_in_window` | -3.5% (critical) |
-| `step_index_norm` | -2.9% (helpful) |
-| `tool_embed` | -2.8% (helpful) |
-| `false_start`, `strategy_change` | ~0% (neutral) |
 
 ### Datasets Used
 
@@ -308,21 +296,40 @@ Train 3.1K param CNN (30.3x data ratio, class-balanced loss)
 | neulab/agent-data-collection (swe-gym) | MIT | 491 | OpenHands | Medium |
 | neulab/agent-data-collection (nebius) | CC-BY-4.0 | 1,717 (sampled) | Llama 70B, Qwen 72B | Weak |
 
-### Labeling Pipeline
+### Feature Ablation — Cross-Distribution Analysis
 
-Trajectories were labeled by Sonnet agents applying deterministic rules on precomputed feature counts (tight-loop steps, diverse steps, error steps). Rules iterated through 5 rounds of prompt tuning with Opus sanity checks. Updated rules include error-based STUCK detection (error_steps >= 7 AND diverse < 3) and `>=` threshold fix recommended by Opus review.
+Ablation on both SWE-bench precision and Claude Code stuck/productive separation revealed that three features have **inverted signals** across distributions:
+
+| Feature | SWE-bench impact | Claude Code impact | Action |
+|---|---|---|---|
+| `steps_since_same_cmd` | -4.9% (critical for SWE-bench) | +8.9% (inverted — hurts CC) | **Zeroed** |
+| `steps_since_same_file` | -0.9% (neutral) | +6.6% (inverted — hurts CC) | **Zeroed** |
+| `file_count_in_window` | 0% (neutral) | +6.2% (inverted — hurts CC) | **Zeroed** |
+| `steps_since_same_tool` | 0% (neutral) | -14.7% (helps CC most) | Kept |
+| `thinking_length` | -4.0% (critical) | -11.9% (helps CC) | Kept |
+| `tool_count_in_window` | -3.5% (critical) | -10.6% (helps CC) | Kept |
+
+**Root cause:** In SWE-bench, low `since_cmd` means tight command loops (stuck). In Claude Code, low `since_cmd` means the agent efficiently reuses familiar commands (productive). The same CRC32 feature has opposite meaning across scaffolds. Zeroing these 3 features eliminates the cross-distribution conflict.
 
 ### Claude Code Validation
 
-Tested on 40 real Claude Code sessions from the benchmark suite (17 tasks, both stuck and productive):
+Tested on real Claude Code sessions from the benchmark suite (proxy-OFF runs):
 
-| Task Category | Max CNN Score | Fires at 0.60? |
-|---|---|---|
-| Known-stuck (GCC, LLVM, Django) | 0.80-0.92 (Python) / 0.04-0.20 (JS e2e) | No |
-| Known-productive (Express, USB) | 0.10-0.22 | No |
-| Held-out tasks (40-45) | 0.05-0.67 | No |
+| Task | Kind | Max Score | Fires at 0.60? | LogReg impact |
+|---|---|---|---|---|
+| 02-gcc-bug | STUCK | 0.49 | No (close) | -47% time |
+| 03-llvm-bug | STUCK | 0.52 | No (close) | +18% time |
+| 06-django-bug | STUCK | 0.48 | No (close) | -47% time |
+| 24-rbtree-bug | STUCK | 0.22 | No | -93% time |
+| 01-gcc-bug | PRODUCTIVE | 0.24 | No | -4% time |
+| 08-express-bug | PRODUCTIVE | 0.06 | No | -14% time |
+| 43-gcc-tbaa | HELD-OUT | 0.07 | No | +200% tokens |
+| 44-llvm-arith | HELD-OUT | 0.39 | No | +79% tokens |
 
-**Key finding:** The CNN eliminates the LogReg's false positive problem (38% token increase on held-out tasks) but also doesn't fire on stuck sessions. The root cause is a distribution gap: SWE-bench stuck patterns are tight exact-command loops (`since_cmd < 0.15`), while Claude Code stuck behavior is subtler — the agent tries varied but unproductive commands that hash to different CRC32 values.
+**Key findings:**
+1. Stuck tasks correctly rank higher (0.48-0.52) than productive tasks (0.06-0.24)
+2. Held-out tasks 43 and 44 (where LogReg caused +200% and +79% token regressions) now score 0.07 and 0.39 — well below threshold
+3. Scores don't reach the 0.60 threshold yet — the CNN correctly separates but needs a lower threshold or additional signal to fire
 
 **JS forward pass verified:** Pure JS inference matches Python with max diff 3.8e-8 across 100 test vectors. No Node.js dependencies beyond `node:zlib` for CRC32.
 
