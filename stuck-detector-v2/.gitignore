@@ -15,8 +15,10 @@ data/test_id.jsonl
 # Review batch inputs (reproducible from prepare_batches.py)
 data/reviews/batch_*.jsonl
 
-# PyTorch checkpoint (cnn_weights.json is the portable format)
+# PyTorch checkpoints (cnn_weights.json is the portable format)
 proxy/cnn_checkpoint.pt
+proxy/cnn_trimmed_checkpoint.pt
+proxy/cnn_streak_checkpoint.pt
 
 # Haiku results (superseded by Sonnet)
 data/reviews/haiku_result_*.jsonl

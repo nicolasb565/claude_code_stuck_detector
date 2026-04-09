@@ -1,14 +1,25 @@
 #!/usr/bin/env node
 /**
- * CNN-based proxy for Claude Code benchmark.
- * Based on the original proxy.mjs but uses CNN stuck detector.
- * COMPACT_ENABLED defaults to OFF for clean comparison.
+ * CNN-based proxy for Claude Code.
+ *
+ * Sits between Claude Code and the Anthropic API to detect stuck reasoning
+ * via a language-agnostic CNN (2,621 params, ~57 KB JS weights).
+ *
+ * Usage:
+ *   node proxy_cnn.mjs &
+ *   ANTHROPIC_BASE_URL=http://localhost:8080 claude "your prompt"
+ *
+ * Environment:
+ *   PROXY_PORT         listen port (default: 8080)
+ *   PROXY_UPSTREAM     upstream API (default: https://api.anthropic.com)
+ *   STUCK_ENABLED      enable stuck detection (default: 1)
+ *   COMPACT_ENABLED    enable Bash output compaction (default: 0)
  */
 
 import { createServer } from "http";
 import { pruneIfStuck, resetState } from "./stuck_cnn.mjs";
-import { log, logRequest } from "../../stuck-detector-proxy/log.mjs";
-import { fetchUpstream, getStats } from "../../stuck-detector-proxy/upstream.mjs";
+import { log, logRequest } from "./log.mjs";
+import { fetchUpstream, getStats } from "./upstream.mjs";
 
 const PORT = parseInt(process.env.PROXY_PORT || "8080", 10);
 const UPSTREAM = process.env.PROXY_UPSTREAM || "https://api.anthropic.com";
@@ -17,7 +28,7 @@ const STUCK_ENABLED = process.env.STUCK_ENABLED !== "0";
 
 let compact = null;
 if (COMPACT_ENABLED) {
-  const mod = await import("../../stuck-detector-proxy/compact.mjs");
+  const mod = await import("./compact.mjs");
   compact = mod.compact;
 }
 
