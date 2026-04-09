@@ -54,7 +54,7 @@ ANTHROPIC_BASE_URL=http://localhost:8080 claude "your prompt"
 
 ## CNN Stuck Detector
 
-A 2,621-parameter CNN trained on 85,416 labeled windows from real Claude Code sessions. Uses cycle-detection features (CRC32-hashed `base_command:target_file` keys, Jaccard output similarity) that generalize across programming languages, agent scaffolds, and model families.
+A 2,621-parameter CNN trained on 85,416 labeled windows from real Claude Code sessions, with DataClaw (the only source with thinking blocks) physically oversampled 10x to match the runtime environment. Uses cycle-detection features (CRC32-hashed `base_command:target_file` keys, Jaccard output similarity) that generalize across programming languages, agent scaffolds, and model families.
 
 ### Architecture
 
@@ -71,9 +71,9 @@ A 2,621-parameter CNN trained on 85,416 labeled windows from real Claude Code se
 
 | Metric | Value |
 |---|---|
-| Precision | 87.1% |
-| Recall | 86.2% |
-| F1 | 0.866 |
+| Precision | 87.5% |
+| Recall | 94.9% |
+| F1 | 0.910 |
 | Threshold | 0.96 |
 | Weights | 57 KB |
 
@@ -81,10 +81,10 @@ A 2,621-parameter CNN trained on 85,416 labeled windows from real Claude Code se
 
 | Metric | Direct (CNN ≥ 0.96) |
 |---|---|
-| Precision | 71.4% |
+| Precision | 62.5% |
 | Recall | 83.3% |
-| F1 | 0.769 |
-| False positives | 2 (08_express, 02_gcc — both test-iteration patterns) |
+| F1 | 0.714 |
+| False positives | 3 (02_gcc, 08_express, 33_geometry — test/build-iteration patterns) |
 | False negatives | 1 (03_llvm off_2, max score = 0.000) |
 
 **Held-out tasks** (never seen in training): **all clean**. The earlier model's 44_llvm_arith false positive is fixed.
@@ -106,7 +106,10 @@ Deterministic labeling (STUCK / PRODUCTIVE / UNCLEAR rules)
     │    → 3,277 resolved (STUCK/PRODUCTIVE)
     │    → 665 dropped (still UNCLEAR)
     ▼
-85,416 labeled windows → train CNN (class-balanced loss, pos_weight 31:1)
+85,416 labeled windows (66,673 nlile + 1,807 DataClaw in train split)
+    │ DataClaw oversampled 10x (physical duplication)
+    ▼
+Train CNN (class-balanced loss, pos_weight 31:1)
 ```
 
 ### Key Innovations
@@ -117,7 +120,9 @@ Deterministic labeling (STUCK / PRODUCTIVE / UNCLEAR rules)
 
 3. **Trimmed feature set** — Dropped 4 near-dead features (`false_start`, `strategy_change`, `circular_lang`, `self_similarity` — thinking-block regex features only populated in 2.5% of data). Going from 15 → 11 features improved F1 from 0.840 → 0.866 and dropped FPs by 29%.
 
-4. **Confirmation rules tested** — 2-of-3, 2-consecutive, streak-based, EMA smoothing. None improved on direct thresholding for this dataset (stuck patterns are short and bursty; multi-window rules mostly hurt recall). The current proxy uses direct CNN output at threshold 0.96.
+4. **DataClaw oversampling** — nlile (97% of training data) has no thinking blocks, but the runtime Claude Code environment and the LogReg benchmark sessions do. Physically duplicating DataClaw 10x in training bridges this gap: test F1 0.884 → 0.910, benchmark F1 0.571 → 0.714, eliminating both the `30_lapack` and `44_llvm_arith` false positives. 20x overshoots and regresses.
+
+5. **Confirmation rules tested** — 2-of-3, 2-consecutive, streak-based, EMA smoothing. None improved on direct thresholding for this dataset (stuck patterns are short and bursty; multi-window rules mostly hurt recall). The current proxy uses direct CNN output at threshold 0.96.
 
 ### Datasets
 
@@ -144,21 +149,23 @@ Deterministic labeling (STUCK / PRODUCTIVE / UNCLEAR rules)
 
 Dropped features (near-dead): `false_start`, `strategy_change`, `circular_lang`, `self_similarity`.
 
-**JS forward pass verified:** Pure JS inference matches Python with max diff 3.8e-8 across 100 test vectors. No Node dependencies beyond `node:zlib` for CRC32.
+**JS forward pass verified:** Pure JS inference matches Python with max diff 6.2e-9 across 100 test vectors. No Node dependencies beyond `node:zlib` for CRC32.
 
 ## Key Findings
 
-1. **Stuck is detectable with a tiny model.** 2,621 parameters, trained on ~2,600 real stuck examples, is enough to reach 87% precision / 86% recall on held-out trajectories.
+1. **Stuck is detectable with a tiny model.** 2,621 parameters, trained on ~2,100 real stuck examples (after DataClaw 10x), is enough to reach 87% precision / 95% recall on held-out trajectories.
 
 2. **The right signals are behavioral, not textual.** Command repetition and output similarity dominate. Thinking-block regex features (`false_start`, `circular_lang`) are either redundant or sparse.
 
 3. **Training data distribution matters more than architecture.** Switching from SWE-bench (where "low since_cmd" means stuck) to Claude Code (where it often means efficient tool reuse) flipped the sign of multiple features. `cmd_semantic_key` and native Claude Code training data fixed this.
 
-4. **Confirmation rules can't save a model from itself.** 2-of-N and streak-based confirmation either catch too few true stucks (because real patterns are short and bursty) or don't suppress the productive FPs (because test/build iteration is structurally similar to stuck loops).
+4. **We need more Claude Code datasets with thinking blocks.** DataClaw (136 sessions, 2.5% of training windows) is currently our only bridge to the thinking-rich runtime environment. Oversampling it 10x closes most of the gap, but this is a workaround — a large labeled corpus of Claude Code sessions with thinking blocks would move the model further than any architectural change we tried.
 
-5. **Generalization to unseen tasks is the hardest problem.** The previous LogReg-based classifier caused +38% token regression on held-out tasks; the old CNN caused the same on gcc_tbaa; this model is clean on all 6 held-out tasks. Getting there required labeling 4,074 ambiguous cases with Sonnet and training on 85K windows.
+5. **Confirmation rules can't save a model from itself.** 2-of-N and streak-based confirmation either catch too few true stucks (because real patterns are short and bursty) or don't suppress the productive FPs (because test/build iteration is structurally similar to stuck loops).
 
-6. **Remaining weakness: productive edit→build→test cycles.** The one persistent false positive (08_express) is the agent iterating on test failures — structurally similar to a stuck loop at the feature level. Fixing it requires a feature that tracks output **change** between repeated commands, not just similarity.
+6. **Generalization to unseen tasks is the hardest problem.** The previous LogReg-based classifier caused +38% token regression on held-out tasks; the old CNN caused the same on gcc_tbaa; this model is clean on all 6 held-out tasks. Getting there required labeling 4,074 ambiguous cases with Sonnet and training on 85K windows.
+
+7. **Remaining weakness: productive edit→build→test cycles.** The persistent false positives (08_express, 02_gcc, 33_geometry) are all the agent iterating on test/build failures — structurally similar to a stuck loop at the feature level. Fixing them requires a feature that tracks output **change** between repeated commands, not just similarity.
 
 ## Related Work
 
@@ -182,10 +189,11 @@ Longer-term, this kind of monitoring belongs inside the model or API — similar
 
 ## Next Steps
 
-1. Address the build/test iteration false positive via an "output change between repeated commands" feature
-2. Run a 5-run benchmark for statistical significance
-3. Add timestamp-based heuristics in the proxy (fast retries boost stuck score, slow gaps dampen)
-4. Explore a lightweight speculative-decoding-style parallel monitor inside inference
+1. Collect/label more Claude Code sessions **with thinking blocks** — currently the biggest lever, oversampling DataClaw 10x is only a partial substitute
+2. Address the build/test iteration false positives via an "output change between repeated commands" feature
+3. Run a 5-run benchmark for statistical significance
+4. Add timestamp-based heuristics in the proxy (fast retries boost stuck score, slow gaps dampen)
+5. Explore a lightweight speculative-decoding-style parallel monitor inside inference
 
 ## License
 

@@ -20,6 +20,9 @@ proxy/cnn_checkpoint.pt
 proxy/cnn_trimmed_checkpoint.pt
 proxy/cnn_streak_checkpoint.pt
 
+# Derived training artifact
+proxy/benchmark_summary.json
+
 # Haiku results (superseded by Sonnet)
 data/reviews/haiku_result_*.jsonl
 
