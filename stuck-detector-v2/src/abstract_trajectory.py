@@ -15,6 +15,58 @@ MAX_OUTPUT_LINES = 100
 TOOL_NAMES = ['bash', 'edit', 'view', 'search', 'create', 'submit', 'other']
 TOOL_TO_IDX = {t: i for i, t in enumerate(TOOL_NAMES)}
 
+# --- Command semantic key ---
+
+_SILENT_CMD_RE = re.compile(r'^(cd|pushd|popd|source|export|set|unset|alias|ulimit|umask)\b')
+_FILE_EXT_RE = re.compile(r'\.[a-zA-Z]{1,5}$')
+
+
+def cmd_semantic_key(cmd):
+    """Extract 'base_command:target_file' for semantic command matching.
+
+    'cd build && ./gcc/xgcc -B./gcc -O2 ../test.c -o test 2>&1 | tail -5'
+    → 'xgcc:test.c'
+
+    'grep -rn "foo" gcc/match.pd | head -20'
+    → 'grep:match.pd'
+
+    'make -j8'
+    → 'make'
+
+    Same logic must be replicated in JS (abstract_step.mjs).
+    """
+    if not cmd:
+        return ''
+
+    # Split on && and ;, drop silent prefixes (cd, source, export)
+    parts = re.split(r'\s*(?:&&|;)\s*', cmd.strip())
+    real = [p for p in parts if p.strip() and not _SILENT_CMD_RE.match(p.strip())]
+    if not real:
+        return cmd.split()[0] if cmd.split() else ''
+
+    # Take first real command, strip pipe suffix
+    first = re.split(r'\s*\|\s*', real[0].strip())[0]
+    tokens = first.strip().split()
+    if not tokens:
+        return ''
+
+    # Base command (strip path)
+    base = tokens[0].rsplit('/', 1)[-1]
+
+    # Find the first file-like argument (has extension or contains /)
+    target = None
+    for tok in tokens[1:]:
+        if tok.startswith('-'):
+            continue
+        if _FILE_EXT_RE.search(tok) or '/' in tok:
+            target = tok.rsplit('/', 1)[-1]  # basename
+            break
+
+    if target:
+        return f'{base}:{target}'
+    return base
+
+
 # --- Output normalization ---
 
 def normalize_to_set(output):
@@ -133,9 +185,13 @@ def abstract_trajectory(parsed_steps):
         output = step.get('output', '')
         thinking = step.get('thinking', '')
 
-        # Hash file and command
+        # Hash file and command (bash uses semantic key for softer matching)
         file_hash = zlib.crc32(file_path.encode()) if file_path else None
-        cmd_hash = zlib.crc32(cmd.encode()) if cmd else None
+        if tool == 'bash' and cmd:
+            cmd_key = cmd_semantic_key(cmd)
+            cmd_hash = zlib.crc32(cmd_key.encode()) if cmd_key else None
+        else:
+            cmd_hash = zlib.crc32(cmd.encode()) if cmd else None
 
         # Output normalization and similarity
         output_set = normalize_to_set(output)

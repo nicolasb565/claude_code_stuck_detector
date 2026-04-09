@@ -41,6 +41,37 @@ const STRATEGY_RE = /\b(different approach|try another|instead|alternatively|let
 const CIRCULAR_RE = /\b(try again|let me try|one more time|retry|attempt again)\b/i;
 
 const MAX_OUTPUT_LINES = 100;
+const SILENT_CMD_RE = /^(cd|pushd|popd|source|export|set|unset|alias|ulimit|umask)\b/;
+const FILE_EXT_RE = /\.[a-zA-Z]{1,5}$/;
+
+/**
+ * Extract 'base_command:target_file' for semantic command matching.
+ * Must match Python cmd_semantic_key() in abstract_trajectory.py.
+ */
+function cmdSemanticKey(cmd) {
+  if (!cmd) return "";
+  const parts = cmd.trim().split(/\s*(?:&&|;)\s*/);
+  const real = parts.filter(p => p.trim() && !SILENT_CMD_RE.test(p.trim()));
+  if (real.length === 0) {
+    const t = cmd.trim().split(/\s+/);
+    return t.length > 0 ? t[0] : "";
+  }
+  const first = real[0].trim().split(/\s*\|\s*/)[0];
+  const tokens = first.trim().split(/\s+/);
+  if (tokens.length === 0) return "";
+  const si = tokens[0].lastIndexOf("/");
+  const base = si >= 0 ? tokens[0].slice(si + 1) : tokens[0];
+  let target = null;
+  for (let i = 1; i < tokens.length; i++) {
+    if (tokens[i].startsWith("-")) continue;
+    if (FILE_EXT_RE.test(tokens[i]) || tokens[i].includes("/")) {
+      const ti = tokens[i].lastIndexOf("/");
+      target = ti >= 0 ? tokens[i].slice(ti + 1) : tokens[i];
+      break;
+    }
+  }
+  return target ? `${base}:${target}` : base;
+}
 
 function hash(str) {
   if (!str) return null;
@@ -127,7 +158,8 @@ export class StuckDetectorState {
     const filePath = input?.file_path || input?.path || null;
 
     const fileHash = hash(filePath);
-    const cmdHash = hash(cmd);
+    const cmdKey = tool === "bash" && cmd ? cmdSemanticKey(cmd) : cmd;
+    const cmdHash = hash(cmdKey);
     const outputSet = normalizeToSet(output);
     const outputSim = jaccard(outputSet, this.outputHistory.get(cmdHash) || null);
 
