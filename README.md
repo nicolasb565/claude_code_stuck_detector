@@ -252,7 +252,7 @@ A language-agnostic CNN trained on 84K+ windows from Claude Code sessions (nlile
 
 ### Architecture
 
-3,133-parameter CNN with two parallel Conv1d branches (kernel 3 + kernel 5), tool embedding, and window-level aggregate features. Input: 10-step windows of 19 features each + 6 window features. Output: stuck probability.
+2,621-parameter CNN with two parallel Conv1d branches (kernel 3 + kernel 5), tool embedding, and window-level aggregate features. Input: 10-step windows of 15 features each (11 continuous + 4 tool embedding) + 6 window features. Output: stuck probability. 57 KB weights in pure JS, sub-millisecond inference.
 
 ### Training Pipeline
 
@@ -278,13 +278,16 @@ Train 3.1K param CNN (class-balanced loss, pos_weight=41:1)
 
 ### Results (Claude Code test set)
 
-| Metric | Old CNN (SWE-bench) | New CNN (Claude Code) |
-|---|---|---|
-| Precision | 77.3% | **81.7%** |
-| Recall | 77.9% | **86.4%** |
-| F1 | 0.776 | **0.840** |
-| Threshold | 0.94 | 0.94 |
-| False positives | 184 | **84** (-54%) |
+| Metric | Old CNN (SWE-bench) | 15-feature CNN | **11-feature CNN** |
+|---|---|---|---|
+| Precision | 77.3% | 81.7% | **86.7%** |
+| Recall | 77.9% | 86.4% | **90.3%** |
+| F1 | 0.776 | 0.840 | **0.885** |
+| Threshold | 0.94 | 0.94 | 0.94 |
+| False positives | 184 | 84 | **60** (-67%) |
+| Parameters | 3,133 | 3,133 | **2,621** |
+
+Dropping 4 near-dead features (false_start, strategy_change, circular_lang, self_similarity — only populated in 2.5% of training data) improved all metrics. Less noise = better signal.
 
 ### Benchmark Validation (CNN on proxy-OFF sessions)
 
@@ -313,7 +316,7 @@ Tested on real Claude Code sessions from the benchmark suite:
 | 44_llvm_arith | **fires** (2/2) | **FP** — test iteration | +79% tokens regression |
 | 45_llvm_delete | clean | Correct | n/a |
 
-**Key improvement:** The old LogReg caused +38% token regression on held-out tasks (fired on gcc_tbaa + django_keytexttransform). The new CNN has 1 held-out FP (44_llvm_arith) — the CNN confuses productive build/test iteration with stuck loops. Remaining FPs: 08_express (test iteration), 30_lapack (rapid edits), would be filtered by 2/3 sliding window confirmation.
+**Key improvement:** The old LogReg caused +38% token regression on held-out tasks (fired on gcc_tbaa + django_keytexttransform). The new CNN has 1 held-out FP (44_llvm_arith) — the CNN confuses productive build/test iteration with stuck loops. The 30_lapack FP was eliminated by dropping near-dead features. Remaining weakness: edit→build→test cycles look like loops to the CNN.
 
 ### Key Innovations
 
@@ -345,21 +348,25 @@ Tested on real Claude Code sessions from the benchmark suite:
 | `output_length` | Moderate | Log of output line count |
 | `step_index_norm` | Moderate | Position in trajectory |
 | `tool_count_in_window` | Moderate | Tool repetition frequency |
-| `thinking_length` | Sparse | Only in DataClaw (2.5% of data) |
-| `self_similarity` | Sparse | Only in DataClaw |
-| `false_start` | Sparse | Only in DataClaw |
-| `strategy_change` | Sparse | Only in DataClaw |
-| `circular_lang` | Sparse | Only in DataClaw |
+| `steps_since_same_tool` | Moderate | Tool type repetition |
+| `steps_since_same_file` | Moderate | File access repetition |
+| `file_count_in_window` | Moderate | File repetition count |
+| `thinking_length` | Moderate | Only in DataClaw (2.5%) but high variance when present |
+| ~~`false_start`~~ | **Dropped** | Near-dead (std=0.041), only 0.1% nonzero |
+| ~~`strategy_change`~~ | **Dropped** | Near-dead (std=0.031), only 0.1% nonzero |
+| ~~`circular_lang`~~ | **Dropped** | Near-dead (std=0.015), only 0.0% nonzero |
+| ~~`self_similarity`~~ | **Dropped** | Near-dead (std=0.012), only 0.2% nonzero |
 
 **JS forward pass verified:** Pure JS inference matches Python with max diff 3.8e-8 across 100 test vectors. No Node.js dependencies beyond `node:zlib` for CRC32.
 
 ## Next Steps
 
 1. Finish labeling remaining 1,700 UNCLEAR windows with Sonnet agents
-2. Retrain CNN with complete labeled data (expect to cross 85% precision target)
+2. Retrain CNN with complete labeled data
 3. Run 5-run benchmark for statistical significance
-4. Address remaining FP pattern: productive build/test iteration misclassified as stuck
-5. Explore lightweight monitor model architecture (speculative-decoding-style parallel inference)
+4. Address remaining FP pattern: productive build/test iteration misclassified as stuck (needs more diverse training data with successful edit→build→test cycles)
+5. Add proxy-level timestamp heuristic (fast retries boost stuck score, slow gaps dampen it)
+6. Explore lightweight monitor model architecture (speculative-decoding-style parallel inference)
 
 ## License
 

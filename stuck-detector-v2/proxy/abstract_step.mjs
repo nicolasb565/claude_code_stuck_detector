@@ -21,12 +21,12 @@ const TOOL_NAMES = ["bash", "edit", "view", "search", "create", "submit", "other
 const TOOL_TO_IDX = Object.fromEntries(TOOL_NAMES.map((t, i) => [t, i]));
 
 // Feature names (must match training order)
+// Dropped: false_start, strategy_change, circular_lang, self_similarity (near-dead in training data)
 const CONTINUOUS_FEATURES = [
   "steps_since_same_tool", "steps_since_same_file", "steps_since_same_cmd",
   "tool_count_in_window", "file_count_in_window", "cmd_count_in_window",
   "output_similarity", "output_length", "is_error", "step_index_norm",
-  "false_start", "strategy_change", "circular_lang",
-  "thinking_length", "self_similarity",
+  "thinking_length",
 ];
 
 const WINDOW_FEATURES = [
@@ -180,11 +180,7 @@ export class StuckDetectorState {
       output_length: Math.log1p(output ? output.split("\n").length : 0),
       is_error: output ? (ERROR_RE.test(output.slice(0, 2000)) ? 1.0 : 0.0) : 0.0,
       step_index_norm: i / Math.max(totalSteps - 1, 1),
-      false_start: thinking && FALSE_START_RE.test(thinking) ? 1.0 : 0.0,
-      strategy_change: thinking && STRATEGY_RE.test(thinking) ? 1.0 : 0.0,
-      circular_lang: thinking && CIRCULAR_RE.test(thinking) ? 1.0 : 0.0,
       thinking_length: Math.log1p(thinking ? thinking.length : 0),
-      self_similarity: wordOverlap(thinking, this.prevThinking),
     };
 
     // Update histories
