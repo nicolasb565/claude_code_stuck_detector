@@ -231,7 +231,8 @@ console.log();
 
 // ── Spawn claude ──────────────────────────────────────────────────────────────
 
-const claudeArgs = ["--resume", sessionId, "--print", nudgeText, "--verbose"];
+const claudeArgs = ["--resume", sessionId, "--print", nudgeText,
+                    "--output-format", "stream-json"];
 
 if (dryRun) {
   console.log(`Would run (from ${sessionCwd}):`);
@@ -248,12 +249,37 @@ console.log(`Spawning claude from ${sessionCwd} ...\n`);
 
 const child = spawn("claude", claudeArgs, {
   cwd:   sessionCwd,
-  stdio: "inherit",
+  stdio: ["ignore", "pipe", "inherit"],
 });
 
 child.on("error", err => {
   console.error(`Failed to spawn claude: ${err.message}`);
   process.exit(1);
+});
+
+// Stream-json formatter: print tool calls and text as they arrive
+let buf = "";
+child.stdout.on("data", chunk => {
+  buf += chunk.toString();
+  const lines = buf.split("\n");
+  buf = lines.pop(); // keep incomplete line
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let ev; try { ev = JSON.parse(line); } catch { process.stdout.write(line + "\n"); continue; }
+    const t = ev.type;
+    if (t === "assistant" && ev.message?.content) {
+      for (const b of ev.message.content) {
+        if (b.type === "text" && b.text?.trim()) {
+          process.stdout.write("\n" + b.text.trim() + "\n");
+        } else if (b.type === "tool_use") {
+          const v = b.input?.command || b.input?.file_path || b.input?.pattern || "";
+          process.stdout.write(`  → ${b.name}: ${String(v).replace(/\n/g, " ").slice(0, 80)}\n`);
+        }
+      }
+    } else if (t === "result") {
+      process.stdout.write(`\n[done — ${ev.subtype ?? ""}]\n`);
+    }
+  }
 });
 
 child.on("exit", code => process.exit(code ?? 0));
