@@ -9,8 +9,9 @@
  * Options:
  *   --dir <path>       Root to scan (default: ~/.claude/projects)
  *   --threshold <f>    Min CNN score to report (default: config.threshold)
+ *   --min-steps <n>    Skip sessions with fewer than N tool calls (default: 20)
  *   --all              Print all sessions regardless of score
- *   --verbose          Show per-session score details
+ *   --verbose          Show per-session score details on stderr (use 2>&1 | grep to filter)
  */
 
 import { readFileSync, readdirSync, statSync } from "fs";
@@ -31,6 +32,7 @@ function getFlag(name, def) {
 
 const scanDir   = getFlag("dir", join(homedir(), ".claude", "projects"));
 const threshold = parseFloat(getFlag("threshold", String(config.threshold)));
+const minSteps  = parseInt(getFlag("min-steps", "20"), 10);
 const showAll   = argv.includes("--all");
 const verbose   = argv.includes("--verbose");
 
@@ -69,7 +71,7 @@ function scoreSession(filepath) {
     }
   }
 
-  if (detector.abstractSteps.length < WINDOW_SIZE) return null;
+  if (detector.abstractSteps.length < minSteps) return null;
 
   let maxScore = 0;
   let firedCount = 0;
