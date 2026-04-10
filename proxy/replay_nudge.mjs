@@ -18,9 +18,10 @@
  *   --dry-run        Print the claude command but don't execute it
  */
 
-import { readFileSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { spawn }        from "child_process";
-import { basename }     from "path";
+import { basename, dirname, join } from "path";
+import { randomUUID }   from "crypto";
 import { StuckDetectorState } from "./abstract_step.mjs";
 import { classifyWindow, normalizeFeatures, config } from "./classify_cnn.mjs";
 
@@ -52,8 +53,8 @@ function parseSession(filepath) {
   const raw       = readFileSync(filepath, "utf-8").trim().split("\n");
   const toolCalls = [];
   const outputMap = new Map();
-  let sessionId   = basename(filepath, ".jsonl");
-  let sessionCwd  = null;
+  let   sessionId = basename(filepath, ".jsonl");
+  let   sessionCwd = null;
 
   // First pass: collect tool results, cwd, session id
   for (const line of raw) {
@@ -94,7 +95,7 @@ function parseSession(filepath) {
     }
   }
 
-  return { toolCalls, sessionId, sessionCwd };
+  return { raw, toolCalls, sessionId, sessionCwd };
 }
 
 // ── CNN scoring ───────────────────────────────────────────────────────────────
@@ -161,7 +162,7 @@ function makeNudgeText(level, turnNum, score, recentList) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-const { toolCalls, sessionId, sessionCwd } = parseSession(sessionFile);
+const { raw, toolCalls, sessionId, sessionCwd } = parseSession(sessionFile);
 
 if (toolCalls.length < WINDOW_SIZE) {
   console.error(`Too few tool calls (${toolCalls.length} < ${WINDOW_SIZE})`);
@@ -203,6 +204,14 @@ if (forcedStep !== null) {
   cnnScore   = best.score;
 }
 
+// Find the JSONL line after the tool result for the cutoff step
+const cutoffLineIdx = toolCalls[cutoffStep].lineIdx;
+let cutoffRawLine = cutoffLineIdx;
+for (let i = cutoffLineIdx + 1; i < raw.length; i++) {
+  let entry; try { entry = JSON.parse(raw[i]); } catch { continue; }
+  if (entry.message?.role === "user") { cutoffRawLine = i; break; }
+}
+
 const recentTcs  = toolCalls.slice(Math.max(0, cutoffStep - 7), cutoffStep + 1);
 const recentList = recentTcs.map(tc => {
   const v = tc.input?.command || tc.input?.file_path || tc.input?.pattern || "";
@@ -229,21 +238,29 @@ for (const tc of recentTcs) {
 }
 console.log();
 
-// ── Spawn claude ──────────────────────────────────────────────────────────────
+// ── Write truncated session and spawn claude ───────────────────────────────────
 
-const claudeArgs = ["--resume", sessionId, "--print", nudgeText,
-                    "--output-format", "stream-json", "--verbose"];
+if (!sessionCwd) {
+  console.error("Could not determine session cwd. Use --dry-run to see the command.");
+  process.exit(1);
+}
+
+// Write a truncated copy of the session up to the cutoff line.
+// claude --resume <new-uuid> --print "<nudge>" loads this history,
+// appends the nudge as the prompt, and responds from the cutoff point.
+const truncatedUuid = randomUUID();
+const outPath = join(dirname(sessionFile), `${truncatedUuid}.jsonl`);
+writeFileSync(outPath, raw.slice(0, cutoffRawLine + 1).join("\n") + "\n");
+console.log(`Truncated session: ${outPath}`);
 
 if (dryRun) {
   console.log(`Would run (from ${sessionCwd}):`);
-  console.log(`  claude --resume ${sessionId} --print "<nudge text>"`);
+  console.log(`  claude --resume ${truncatedUuid} --print "<nudge text>"`);
   process.exit(0);
 }
 
-if (!sessionCwd) {
-  console.error("Could not determine session cwd — use --dry-run to see the command and run it manually.");
-  process.exit(1);
-}
+const claudeArgs = ["--resume", truncatedUuid, "--print", nudgeText,
+                    "--output-format", "stream-json", "--verbose"];
 
 console.log(`Spawning claude from ${sessionCwd} ...\n`);
 
