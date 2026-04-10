@@ -21,6 +21,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { randomUUID } from "crypto";
 import { dirname, join } from "path";
+import { homedir } from "os";
 import { execSync } from "child_process";
 import { StuckDetectorState } from "./abstract_step.mjs";
 import { classifyWindow, normalizeFeatures, config } from "./classify_cnn.mjs";
@@ -44,7 +45,12 @@ function getFlag(name, def) {
 
 const nudgeLevel = parseInt(getFlag("level", "0"), 10);
 const forcedStep = getFlag("step", null);
-const outDir     = getFlag("out", dirname(sessionFile));
+// Default output dir: Claude project dir for the current cwd.
+// claude --resume scopes to the current project, so writing there
+// means you can run the resume command from wherever you run this script.
+const defaultOutDir = join(homedir(), ".claude", "projects",
+  process.cwd().replace(/\//g, "-"));
+const outDir = getFlag("out", defaultOutDir);
 const autoRun    = argv.includes("--run");
 const listMode      = argv.includes("--list");
 const listThreshold = parseFloat(getFlag("list-threshold", "0.0"));
