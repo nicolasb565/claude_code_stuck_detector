@@ -10,10 +10,10 @@
  * Streak/confirmation rules were evaluated but did not improve over direct
  * thresholding — they only delay the first detection without suppressing FPs.
  *
- * Nudge escalation: two silent detections (-2→-1→0) before the first nudge
- * fires, then soft → medium → hard. Exponential backoff per level: 1/2/4/8
- * turns so silent levels clear fast and nudge levels give the agent increasing
- * time to respond. Resets to -2 when score drops below NUDGE_RESET_THRESHOLD.
+ * Nudge escalation: one silent detection (-1→0) before the first nudge fires,
+ * then soft → medium → hard. Exponential backoff per level: 1/4/8 turns so
+ * the silent level clears fast and nudge levels give the agent increasing time
+ * to respond. Resets to -1 when score drops below NUDGE_RESET_THRESHOLD.
  */
 
 import { classifyWindow, normalizeFeatures, config } from "./classify_cnn.mjs";
@@ -47,7 +47,7 @@ function getSession(messages) {
   
       turnCounter: 0,
       lastNudgeTurn: -999,
-      nudgeLevel: -2,      // -2→-1 silent, 0→1→2 fire nudge; absorbs short FP bursts
+      nudgeLevel: -1,      // -1 silent, 0→1→2 fire nudge; absorbs 1-turn FP spikes
       initialized: false,
     });
   }
@@ -120,9 +120,9 @@ export function pruneIfStuck(messages, log) {
   const session = getSession(messages);
   session.turnCounter++;
 
-  // Exponential backoff per level: silent levels clear fast, nudge levels give
-  // the agent increasing time to respond. Level -2: 1 turn, -1: 2, 0: 4, 1+: 8.
-  const LEVEL_COOLDOWNS = { "-2": 1, "-1": 2, "0": 4, "1": 8, "2": 8 };
+  // Exponential backoff per level: silent level clears fast, nudge levels give
+  // the agent increasing time to respond. Level -1: 1 turn, 0: 4, 1+: 8.
+  const LEVEL_COOLDOWNS = { "-1": 1, "0": 4, "1": 8, "2": 8 };
   const cooldown = LEVEL_COOLDOWNS[String(session.nudgeLevel)] ?? 4;
   if (session.turnCounter - session.lastNudgeTurn < cooldown) return messages;
 
@@ -178,7 +178,7 @@ export function pruneIfStuck(messages, log) {
   const shouldFire = score >= config.threshold;
 
   if (!shouldFire) {
-    if (score < NUDGE_RESET_THRESHOLD) session.nudgeLevel = -2; // agent responded, full reset
+    if (score < NUDGE_RESET_THRESHOLD) session.nudgeLevel = -1; // agent responded, full reset
     return messages;
   }
 
