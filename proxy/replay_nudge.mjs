@@ -231,7 +231,7 @@ console.log();
 
 // ── Spawn claude ──────────────────────────────────────────────────────────────
 
-const claudeArgs = ["--resume", sessionId, "--print", nudgeText];
+const claudeArgs = ["--resume", sessionId, "--print", nudgeText, "--verbose"];
 
 if (dryRun) {
   console.log(`Would run (from ${sessionCwd}):`);
