@@ -10,9 +10,11 @@
  * Streak/confirmation rules were evaluated but did not improve over direct
  * thresholding — they only delay the first detection without suppressing FPs.
  *
- * Nudge escalation: soft → medium → hard if the agent stays stuck across
- * consecutive STUCK_COOLDOWN windows. Resets when score drops below
- * NUDGE_RESET_THRESHOLD (hysteresis to avoid resetting on brief dips).
+ * Nudge escalation: two silent detections (-2→-1→0) before the first nudge
+ * fires, then soft → medium → hard if the agent stays stuck across consecutive
+ * STUCK_COOLDOWN windows. Resets when score drops below NUDGE_RESET_THRESHOLD.
+ * The two silent levels absorb false positives from short productive loops
+ * (edit→test cycles) that self-resolve within a cooldown window.
  */
 
 import { classifyWindow, normalizeFeatures, config } from "./classify_cnn.mjs";
@@ -46,7 +48,7 @@ function getSession(messages) {
   
       turnCounter: 0,
       lastNudgeTurn: -999,
-      nudgeLevel: 0,       // escalates 0→1→2 while stuck persists across cooldowns
+      nudgeLevel: -2,      // -2→-1 silent, 0→1→2 fire nudge; absorbs short FP bursts
       initialized: false,
     });
   }
@@ -174,7 +176,7 @@ export function pruneIfStuck(messages, log) {
   const shouldFire = score >= config.threshold;
 
   if (!shouldFire) {
-    if (score < NUDGE_RESET_THRESHOLD) session.nudgeLevel = 0; // agent responded, reset
+    if (score < NUDGE_RESET_THRESHOLD) session.nudgeLevel = -2; // agent responded, full reset
     return messages;
   }
 
@@ -188,6 +190,12 @@ export function pruneIfStuck(messages, log) {
   });
 
   session.lastNudgeTurn = session.turnCounter;
+
+  // Silent levels: absorb detection without injecting nudge
+  if (session.nudgeLevel < 0) {
+    session.nudgeLevel++;
+    return messages;
+  }
 
   // Build recent tool call summary
   const recentTools = [];
