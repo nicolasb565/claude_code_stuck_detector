@@ -46,7 +46,8 @@ const nudgeLevel = parseInt(getFlag("level", "0"), 10);
 const forcedStep = getFlag("step", null);
 const outDir     = getFlag("out", dirname(sessionFile));
 const autoRun    = argv.includes("--run");
-const listMode   = argv.includes("--list");
+const listMode      = argv.includes("--list");
+const listThreshold = parseFloat(getFlag("list-threshold", "0.0"));
 
 // ── Parse session ─────────────────────────────────────────────────────────────
 // We need two things:
@@ -202,16 +203,17 @@ if (listMode) {
   const scoreByEnd = new Map(windowScores.map(w => [w.end, w.score]));
   console.log(`${"step".padStart(4)}  ${"tool".padEnd(8)}  ${"cnn".padStart(5)}  input`);
   console.log("─".repeat(72));
+  let shown = 0;
   for (let i = 0; i < toolCalls.length; i++) {
     const tc    = toolCalls[i];
     const score = scoreByEnd.get(i);
-    const v     = tc.input?.command || tc.input?.file_path || tc.input?.pattern || "";
-    const bar   = score !== undefined
-      ? (score >= config.threshold ? "▓" : score >= 0.5 ? "░" : " ") + score.toFixed(2)
-      : "     ";
+    if (score === undefined || score < listThreshold) continue;
+    const v   = tc.input?.command || tc.input?.file_path || tc.input?.pattern || "";
+    const bar = (score >= config.threshold ? "▓" : score >= 0.5 ? "░" : " ") + score.toFixed(2);
     console.log(`${String(i).padStart(4)}  ${tc.name.padEnd(8)}  ${bar.padStart(5)}  ${String(v).replace(/\n/g, " ").slice(0, 50)}`);
+    shown++;
   }
-  console.log(`\n${toolCalls.length} tool calls total. Peak CNN window ends at step with ▓.`);
+  console.log(`\n${shown} / ${toolCalls.length} steps shown (--list-threshold ${listThreshold}). ▓ = above fire threshold.`);
   console.log(`Re-run with --step N to inject the nudge at step N.`);
   process.exit(0);
 }
