@@ -32,13 +32,13 @@ ALL_FEATURES = [
     'false_start', 'strategy_change', 'circular_lang',
     'thinking_length', 'self_similarity',
 ]
-KEEP_IDX = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14]  # 12 features incl. has_prior_output, thinking_length
+KEEP_IDX = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]  # 11 features; thinking_length dropped (noise outside DataClaw)
 KEEP_FEATURES = [ALL_FEATURES[i] for i in KEEP_IDX]
 NUM_CONTINUOUS = len(KEEP_FEATURES)
 
 WINDOW_FEATURES = [
     'unique_tools_ratio', 'unique_files_ratio', 'unique_cmds_ratio',
-    'error_rate', 'output_similarity_avg', 'output_diversity',
+    'error_rate', 'output_similarity_avg',  # output_diversity dropped (redundant with output_similarity_avg)
 ]
 WINDOW_FEAT_DIM = len(WINDOW_FEATURES)
 
@@ -46,7 +46,7 @@ NUM_TOOLS = 7
 TOOL_EMBED_DIM = 4
 WINDOW_SIZE = 10
 
-DATACLAW_OVERSAMPLE = 10
+DATACLAW_OVERSAMPLE = 5
 
 SEED = 42
 

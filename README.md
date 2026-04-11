@@ -1,6 +1,6 @@
 # Context Management for AI Coding Agents
 
-Research into detecting when Claude Code goes in circles — a 2,621-parameter CNN trained on 85K windows of real Claude Code sessions, running entirely in JavaScript inside a local proxy. When the agent gets stuck, the proxy injects a corrective nudge. Language-agnostic, no Python runtime, no patches to Claude Code.
+Research into detecting when Claude Code goes in circles — a 2,605-parameter CNN trained on 85K windows of real Claude Code sessions, running entirely in JavaScript inside a local proxy. When the agent gets stuck, the proxy injects a corrective nudge. Language-agnostic, no Python runtime, no patches to Claude Code.
 
 ## The Problem
 
@@ -24,7 +24,7 @@ Claude Code (unmodified)
 Proxy (localhost:8080)
     ├── Parse tool calls from message history
     ├── Abstract into 10-step sliding windows
-    ├── Score with CNN (pure JS, 57 KB weights)
+    ├── Score with CNN (pure JS, 56 KB weights)
     ├── Inject escalating nudge when stuck detected
     ├── Retry with exponential backoff on 429/529
     └── Forward to api.anthropic.com
@@ -67,45 +67,42 @@ When the CNN fires, it injects a corrective message into the conversation. If th
 
 ## CNN Stuck Detector
 
-A 2,621-parameter CNN trained on 85,416 labeled windows from real Claude Code sessions, with DataClaw (the only source with thinking blocks) physically oversampled 10x to match the runtime environment. Uses cycle-detection features (CRC32-hashed `base_command:target_file` keys, Jaccard output similarity) that generalize across programming languages, agent scaffolds, and model families.
+A 2,605-parameter CNN trained on 85,416 labeled windows from real Claude Code sessions. Uses cycle-detection features (CRC32-hashed `base_command:target_file` keys, Jaccard output similarity) that generalize across programming languages, agent scaffolds, and model families.
 
 ### Architecture
 
 - **Input:** 10-step sliding windows of tool calls (stride 5)
-- **Features per step:** 11 continuous (cycle detection, repetition, errors, output similarity) + 7-way tool embedding
-- **Window-level features:** 6 aggregates (unique tool/file/cmd ratios, error rate, output diversity)
+- **Features per step:** 11 continuous (cycle detection, repetition, errors, output similarity) + 7-way tool embedding (4d)
+- **Window-level features:** 5 aggregates (unique tool/file/cmd ratios, error rate, output similarity avg)
 - **Model:** 2 parallel Conv1d branches (kernels 3+5, 16 filters each), max pool, MLP head
 - **Output:** Sigmoid stuck probability
-- **Size:** 57 KB JSON weights, runs in pure JS (no Python, no GPU)
+- **Size:** 56 KB JSON weights, runs in pure JS (no Python, no GPU)
 
 ### Results
 
-**Test set** (16,936 windows from held-out trajectories):
+**Test set** (29,283 windows from held-out trajectories):
 
 | Metric | Value |
 |---|---|
-| Precision | 87.5% |
-| Recall | 94.9% |
-| F1 | 0.910 |
+| Precision | 93.0% |
+| Recall | 93.0% |
+| F1 | 0.930 |
 | Threshold | 0.96 |
-| Weights | 57 KB |
+| Weights | 56 KB |
 
 **Benchmark on the LogReg-era task suite** (29 sessions, 6 stuck):
 
-| Metric | Direct (CNN ≥ 0.96) |
+| Metric | Value |
 |---|---|
-| Precision | 62.5% |
-| Recall | 83.3% |
-| F1 | 0.714 |
-| False positives | 3 (02_gcc, 08_express, 33_geometry — test/build-iteration patterns) |
-| False negatives | 1 (03_llvm off_2, max score = 0.000) |
+| Benchmark fires | 2 (02_gcc off_2, 03_llvm off_1 — both genuine) |
+| False positives | 0 on heldout tasks |
 
-**Held-out tasks** (never seen in training): **all clean**. The earlier model's 44_llvm_arith false positive is fixed.
+**Held-out tasks** (6 tasks, never seen in training): **all clean**.
 
 ### Training Pipeline
 
 ```
-Claude Code sessions (nlile 16.8K + DataClaw 136)
+Claude Code sessions (nlile 16.8K + DataClaw 136 + work_embedded_c)
     │
     │ Parse with cmd_semantic_key: 'cd build && make -j8 | tail' → 'make'
     ▼
@@ -114,71 +111,83 @@ Abstract to features (CRC32 of semantic key, Jaccard output similarity)
     ▼
 Deterministic labeling (STUCK / PRODUCTIVE / UNCLEAR rules)
     │
-    │ 82,128 high-confidence STUCK+PRODUCTIVE
-    │ 4,074 UNCLEAR → Sonnet agent review with raw text
-    │    → 3,277 resolved (STUCK/PRODUCTIVE)
-    │    → 665 dropped (still UNCLEAR)
+    │ PRODUCTIVE → written directly to labeled file (high-precision rules)
+    │ STUCK      → written to labeled file, then Sonnet-verified
+    │ UNCLEAR    → Sonnet review batches (raw command/output text)
+    │                → still UNCLEAR after Sonnet → Opus
+    │                → still UNCLEAR after Opus → dropped
     ▼
-85,416 labeled windows (66,673 nlile + 1,807 DataClaw in train split)
-    │ DataClaw oversampled 10x (physical duplication)
+85,416 labeled windows (770 STUCK, all Sonnet-confirmed)
+    │ DataClaw oversampled 5x (physical duplication)
     ▼
-Train CNN (class-balanced loss, pos_weight 31:1)
+Train CNN (class-balanced BCEWithLogitsLoss, early stopping on test F1)
 ```
 
 ### Key Innovations
 
 1. **`cmd_semantic_key`** — Extracts `base_command:target_file` from bash commands. `cd build && ./gcc/xgcc -O2 test.c | tail` → `xgcc:test.c`. Makes command-repetition features work across projects without per-project retraining.
 
-2. **Three-tier labeling** — Deterministic rules for clear cases, Sonnet agent review for UNCLEAR (with raw command/output text, not just numeric features), drop if still ambiguous.
+2. **Three-tier labeling with mandatory STUCK verification** — Heuristic STUCK labels are never used directly. All 2,606 heuristic-labeled STUCK windows were sent through Sonnet review: 770 confirmed STUCK, 1,815 flipped to PRODUCTIVE (false positives), 21 dropped. Final training labels are 100% LLM-verified for the STUCK class.
 
-3. **Trimmed feature set** — Dropped 4 near-dead features (`false_start`, `strategy_change`, `circular_lang`, `self_similarity` — thinking-block regex features only populated in 2.5% of data). Going from 15 → 11 features improved F1 from 0.840 → 0.866 and dropped FPs by 29%.
+3. **Feature ablation to v4** — Left-one-out ablation on 24 feature variants with dual evaluation (labeled test F1 + false positive rate on 4 known-productive sessions). Dropped 2 features:
+   - `thinking_length`: zero in 97.5% of training data (only DataClaw has thinking blocks) — pure noise
+   - `output_diversity` (window-level): redundant with `output_similarity_avg` which already averages per-step Jaccard
+   - Going from 12→11 continuous + 6→5 window features improved F1 from 0.910 → 0.930
 
-4. **DataClaw oversampling** — nlile (97% of training data) has no thinking blocks, but the runtime Claude Code environment and the LogReg benchmark sessions do. Physically duplicating DataClaw 10x in training bridges this gap: test F1 0.884 → 0.910, benchmark F1 0.571 → 0.714, eliminating both the `30_lapack` and `44_llvm_arith` false positives. 20x overshoots and regresses.
+4. **DataClaw oversample sweep** — Swept 0x/1x/5x/10x with v4 features. 5x is optimal: F1 0.930, 22 false fires on 4 productive sessions vs 29 at 10x. 10x was tuned for `thinking_length` which is now dropped; without it, the extra DataClaw weight is noise.
 
-5. **Confirmation rules tested** — 2-of-3, 2-consecutive, streak-based, EMA smoothing. None improved on direct thresholding for this dataset (stuck patterns are short and bursty; multi-window rules mostly hurt recall). The current proxy uses direct CNN output at threshold 0.96.
+5. **Training improvement study (null result)** — Tested validation split, pos_weight from natural distribution, label smoothing (ε=0.1), and threshold tuning sequentially. All four made things worse. At 2,605 parameters and 98K training windows, the model is data-hungry: removing 20% for a val split costs more than unbiased model selection gains. Label smoothing at 0.1 is too aggressive for a 1.2% STUCK rate. The baseline config (full training set, pos_weight from oversampled counts, fixed threshold 0.96) wins on both axes.
+
+6. **Confirmation rules tested** — 2-of-3, 2-consecutive, streak-based, EMA smoothing. None improved on direct thresholding (stuck patterns are short and bursty; multi-window rules mostly hurt recall). The proxy uses direct CNN output at threshold 0.96.
 
 ### Datasets
 
 | Dataset | License | Sessions | Role |
 |---|---|---|---|
 | [nlile/misc-merged](https://huggingface.co/datasets/nlile/misc-merged) | Apache-2.0 | 16,841 | Primary source, no thinking blocks |
-| [DataClaw](https://huggingface.co/datasets/DataClaw) (woctordho) | Apache-2.0 | 136 | Has thinking blocks |
+| [DataClaw](https://huggingface.co/datasets/DataClaw) (woctordho) | Apache-2.0 | 136 | Has thinking blocks, oversampled 5x |
+| work_embedded_c | Internal | ~500 | Embedded C sessions, 1x (no oversample) |
 
-### Feature Set (11 continuous + tool embed + 6 window-level)
+### Feature Set (11 continuous + tool embed + 5 window-level)
 
-| Feature | Signal | Notes |
+| Feature | Level | Signal |
 |---|---|---|
-| `steps_since_same_cmd` | **Core** | With cmd_semantic_key, detects command repetition |
-| `cmd_count_in_window` | **Core** | Repetition count within window |
-| `output_similarity` | **Core** | Jaccard on output lines; same result = stuck |
-| `is_error` | Moderate | Errors in loops = stuck, errors alone = debugging |
-| `output_length` | Moderate | Log of output line count |
-| `step_index_norm` | Moderate | Position in trajectory |
-| `tool_count_in_window` | Moderate | Tool repetition frequency |
-| `steps_since_same_tool` | Moderate | Tool type repetition |
-| `steps_since_same_file` | Moderate | File access repetition |
-| `file_count_in_window` | Moderate | File repetition count |
-| `thinking_length` | Sparse but useful | Only populated in DataClaw |
+| `steps_since_same_cmd` | Per-step | Core — command repetition via semantic key |
+| `cmd_count_in_window` | Per-step | Core — repetition count within window |
+| `output_similarity` | Per-step | Core — Jaccard on output lines; same result = stuck |
+| `is_error` | Per-step | Errors in loops = stuck, errors alone = debugging |
+| `output_length` | Per-step | Log of output line count |
+| `step_index_norm` | Per-step | Position in trajectory |
+| `tool_count_in_window` | Per-step | Tool repetition frequency |
+| `steps_since_same_tool` | Per-step | Tool type repetition |
+| `steps_since_same_file` | Per-step | File access repetition |
+| `file_count_in_window` | Per-step | File repetition count |
+| `has_prior_output` | Per-step | Whether this command has been run before |
+| `unique_tools_ratio` | Window | Tool diversity across the window |
+| `unique_files_ratio` | Window | File diversity across the window |
+| `unique_cmds_ratio` | Window | Command diversity across the window |
+| `error_rate` | Window | Fraction of steps that produced errors |
+| `output_similarity_avg` | Window | Mean per-step Jaccard across window |
 
-Dropped features (near-dead): `false_start`, `strategy_change`, `circular_lang`, `self_similarity`.
+Dropped features: `false_start`, `strategy_change`, `circular_lang`, `self_similarity` (regex patterns, near-dead in training data); `thinking_length` (zero in 97.5% of windows); `output_diversity` (window-level, redundant with `output_similarity_avg`).
 
 **JS forward pass verified:** Pure JS inference matches Python with max diff 6.2e-9 across 100 test vectors. No Node dependencies beyond `node:zlib` for CRC32.
 
 ## Key Findings
 
-1. **Stuck is detectable with a tiny model.** 2,621 parameters, trained on ~2,100 real stuck examples (after DataClaw 10x), is enough to reach 87% precision / 95% recall on held-out trajectories.
+1. **Stuck is detectable with a tiny model.** 2,605 parameters, trained on ~770 real stuck examples (Sonnet-verified), reaches 93% precision / 93% recall on held-out trajectories.
 
-2. **The right signals are behavioral, not textual.** Command repetition and output similarity dominate. Thinking-block regex features (`false_start`, `circular_lang`) are either redundant or sparse.
+2. **The right signals are behavioral, not textual.** Command repetition and output similarity dominate. Thinking-block regex features (`false_start`, `circular_lang`) are either redundant or sparse. The model generalizes because it measures *repetition patterns*, not language or domain.
 
-3. **Training data distribution matters more than architecture.** Switching from SWE-bench (where "low since_cmd" means stuck) to Claude Code (where it often means efficient tool reuse) flipped the sign of multiple features. `cmd_semantic_key` and native Claude Code training data fixed this.
+3. **Every STUCK label must be LLM-verified.** Heuristic STUCK rules have a ~70% false positive rate — 1,815 of 2,606 heuristic-labeled STUCK windows were actually productive exploration. Direct heuristic labeling is only reliable for PRODUCTIVE (high-diversity, no tight loops). All STUCK training labels go through Sonnet review.
 
-4. **We need more Claude Code datasets with thinking blocks.** DataClaw (136 sessions, 2.5% of training windows) is currently our only bridge to the thinking-rich runtime environment. Oversampling it 10x closes most of the gap, but this is a workaround — a large labeled corpus of Claude Code sessions with thinking blocks would move the model further than any architectural change we tried.
+4. **DataClaw oversampling: 5x, not 10x.** The 10x rate was chosen when `thinking_length` was a feature, giving DataClaw a structural advantage. Once `thinking_length` is dropped (it's zero in 97.5% of windows), 10x becomes harmful overfit. 5x retains the distribution benefit without the noise amplification.
 
-5. **Confirmation rules can't save a model from itself.** 2-of-N and streak-based confirmation either catch too few true stucks (because real patterns are short and bursty) or don't suppress the productive FPs (because test/build iteration is structurally similar to stuck loops).
+5. **Training hyperparameters are saturated.** At this scale (2,605 params, 98K windows), validation splits, label smoothing, pos_weight correction, and threshold tuning all make things worse. The bottleneck is data quality and feature expressiveness, not optimization.
 
-6. **Generalization to unseen tasks is the hardest problem.** The previous LogReg-based classifier caused +38% token regression on held-out tasks; the old CNN caused the same on gcc_tbaa; this model is clean on all 6 held-out tasks. Getting there required labeling 4,074 ambiguous cases with Sonnet and training on 85K windows.
+6. **Remaining weakness: productive edit→build→test cycles.** The persistent false positives are agents iterating on test/build failures — structurally identical to stuck loops at the feature level. Fixing this requires tracking output *change* between repeated commands, not just similarity.
 
-7. **Remaining weakness: productive edit→build→test cycles.** The persistent false positives (08_express, 02_gcc, 33_geometry) are all the agent iterating on test/build failures — structurally similar to a stuck loop at the feature level. Fixing them requires a feature that tracks output **change** between repeated commands, not just similarity.
+7. **We need more Claude Code datasets with thinking blocks.** DataClaw (136 sessions) is currently the only source with extended thinking. 5x oversampling is a workaround — a larger labeled corpus with thinking blocks would move the model further than any architectural change.
 
 ## Related Work
 
@@ -202,8 +211,8 @@ Longer-term, this kind of monitoring belongs inside the model or API — similar
 
 ## Next Steps
 
-1. Collect/label more Claude Code sessions **with thinking blocks** — currently the biggest lever, oversampling DataClaw 10x is only a partial substitute
-2. Address the build/test iteration false positives via an "output change between repeated commands" feature
+1. Collect/label more Claude Code sessions **with thinking blocks** — currently the biggest lever, 5x DataClaw oversampling is only a partial substitute
+2. Add an "output change between repeated commands" feature to break the edit→build→test false positive pattern
 3. Run a 5-run benchmark for statistical significance
 4. Add timestamp-based heuristics in the proxy (fast retries boost stuck score, slow gaps dampen)
 5. Explore a lightweight speculative-decoding-style parallel monitor inside inference

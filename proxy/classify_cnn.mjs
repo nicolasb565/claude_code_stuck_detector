@@ -2,7 +2,8 @@
  * Pure JS CNN inference for stuck detection.
  * No dependencies — loads weights from cnn_weights.json.
  *
- * Architecture: tool_embed(7,4) → [conv3(19,16,k3) + conv5(19,16,k5)] → maxpool → concat(32+6) → fc1(38,16) → fc2(16,1)
+ * Architecture: tool_embed(7,4) → [conv3(STEP_DIM,16,k3) + conv5(STEP_DIM,16,k5)] → maxpool → concat(32+WIN_FEAT_DIM) → fc1 → fc2(16,1)
+ * Dimensions are read from cnn_config.json at load time.
  */
 
 import { readFileSync } from "fs";
@@ -26,13 +27,14 @@ const fc1W = W["fc1.weight"];              // (16, 38)
 const fc1B = W["fc1.bias"];               // (16,)
 const fc2W = W["fc2.weight"];             // (1, 16)
 const fc2B = W["fc2.bias"];              // (1,)
-const normMean = W["norm_mean"];          // (15,)
-const normStd = W["norm_std"];            // (15,)
+const normMean = W["norm_mean"];          // (NUM_CONTINUOUS,)
+const normStd = W["norm_std"];            // (NUM_CONTINUOUS,)
 
-const WINDOW_SIZE = config.window_size;     // 10
-const TOOL_EMBED_DIM = config.tool_embed_dim; // 4
-const NUM_CONTINUOUS = config.num_continuous;  // 15
-const STEP_DIM = TOOL_EMBED_DIM + NUM_CONTINUOUS; // 19
+const WINDOW_SIZE    = config.window_size;                        // 10
+const TOOL_EMBED_DIM = config.tool_embed_dim;                     // 4
+const NUM_CONTINUOUS = config.num_continuous;                     // 11
+const WIN_FEAT_DIM   = config.window_features.length;            // 5
+const STEP_DIM       = TOOL_EMBED_DIM + NUM_CONTINUOUS;          // 15
 
 /**
  * Conv1d: input (seqLen, inC), weight (outC, inC, kernelSize), bias (outC)
@@ -102,16 +104,16 @@ function sigmoid(x) {
  * Classify a window of 10 steps.
  *
  * @param {number[]} toolIndices - (10,) tool category indices (0-6)
- * @param {number[][]} continuousFeatures - (10, 15) normalized continuous features
- * @param {number[]} windowFeatures - (6,) window-level features
+ * @param {number[][]} continuousFeatures - (10, NUM_CONTINUOUS) normalized continuous features
+ * @param {number[]} windowFeatures - (WIN_FEAT_DIM,) window-level features
  * @returns {{ score: number, stuck: boolean }}
  */
 export function classifyWindow(toolIndices, continuousFeatures, windowFeatures) {
-  // 1. Embed tools and concat with continuous features → (10, 19)
+  // 1. Embed tools and concat with continuous features → (10, STEP_DIM)
   const embedded = new Array(WINDOW_SIZE);
   for (let t = 0; t < WINDOW_SIZE; t++) {
-    const emb = toolEmbed[toolIndices[t]]; // (4,)
-    const cont = continuousFeatures[t];     // (15,)
+    const emb = toolEmbed[toolIndices[t]];
+    const cont = continuousFeatures[t];
     embedded[t] = new Float64Array(STEP_DIM);
     for (let i = 0; i < TOOL_EMBED_DIM; i++) embedded[t][i] = emb[i];
     for (let i = 0; i < NUM_CONTINUOUS; i++) embedded[t][TOOL_EMBED_DIM + i] = cont[i];
@@ -121,11 +123,11 @@ export function classifyWindow(toolIndices, continuousFeatures, windowFeatures) 
   const c3 = relu(globalMaxPool(conv1d(embedded, conv3W, conv3B, 3)));  // (16,)
   const c5 = relu(globalMaxPool(conv1d(embedded, conv5W, conv5B, 5)));  // (16,)
 
-  // 3. Concat conv outputs + window features → (38,)
-  const pooled = new Float64Array(32 + 6);
+  // 3. Concat conv outputs + window features → (32 + WIN_FEAT_DIM,)
+  const pooled = new Float64Array(32 + WIN_FEAT_DIM);
   for (let i = 0; i < 16; i++) pooled[i] = c3[i];
   for (let i = 0; i < 16; i++) pooled[16 + i] = c5[i];
-  for (let i = 0; i < 6; i++) pooled[32 + i] = windowFeatures[i];
+  for (let i = 0; i < WIN_FEAT_DIM; i++) pooled[32 + i] = windowFeatures[i];
 
   // 4. FC layers (no dropout at inference)
   const hidden = relu(dense(pooled, fc1W, fc1B));  // (16,)

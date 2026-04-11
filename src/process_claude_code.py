@@ -5,6 +5,13 @@
 3. Window into 10-step chunks
 4. Label with deterministic rules (STUCK/PRODUCTIVE/UNCLEAR)
 
+Labeling policy:
+  - PRODUCTIVE rules are high-precision and written directly to the labeled file.
+  - STUCK rules are heuristic candidates — all are sent through Sonnet review
+    via extract_stuck_for_review.py + review_stuck.py before entering training.
+  - UNCLEAR windows (no rule matched) go to Sonnet review batches directly.
+  - Final STUCK labels in training data are always Sonnet-verified.
+
 Usage:
     python src/process_claude_code.py
 
@@ -16,6 +23,8 @@ Writes: data/sources/nlile_labeled.jsonl      (STUCK + PRODUCTIVE windows)
 
 After Sonnet review, run:
     python src/review_unclear.py merge-sonnet
+    python src/extract_stuck_for_review.py <source>   # send STUCK for verification
+    python src/review_stuck.py <source>               # apply Sonnet decisions
     python src/merge_sources.py --force
 """
 
@@ -41,6 +50,14 @@ TOOL_NAMES = ['bash', 'edit', 'view', 'search', 'create', 'submit', 'other']
 # --- Deterministic labeling ---
 
 def classify_precomputed(precomputed):
+    """
+    Classify a window as STUCK, PRODUCTIVE, or UNCLEAR.
+
+    STUCK and PRODUCTIVE are heuristic candidates only. All STUCK windows
+    are subsequently sent through Sonnet review (extract_stuck_for_review.py
+    + review_stuck.py) before entering training data. UNCLEAR windows go
+    directly to Sonnet review batches.
+    """
     tight = precomputed['tight_loop_steps']
     diverse = precomputed['diverse_steps']
     errors = precomputed['error_steps']

@@ -119,14 +119,12 @@ def score_session(filepath, model, mean, std):
         tools = [s['tool'] for s in window]
         fh = [s.get('file_hash') for s in window if s.get('file_hash') is not None]
         ch = [s.get('cmd_hash') for s in window if s.get('cmd_hash') is not None]
-        al = [line for s in window if s.get('output_set') for line in s['output_set']]
         wf = torch.tensor([[
             len(set(tools)) / len(tools),
             len(set(fh)) / max(len(fh), 1) if fh else 1.0,
             len(set(ch)) / max(len(ch), 1) if ch else 1.0,
             sum(1 for s in window if s['is_error']) / len(window),
             sum(s['output_similarity'] for s in window) / len(window),
-            len(set(al)) / max(len(al), 1) if al else 1.0,
         ]], dtype=torch.float32)
 
         with torch.no_grad():

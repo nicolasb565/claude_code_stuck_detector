@@ -22,16 +22,17 @@ const TOOL_TO_IDX = Object.fromEntries(TOOL_NAMES.map((t, i) => [t, i]));
 
 // Feature names (must match training order)
 // Dropped: false_start, strategy_change, circular_lang, self_similarity (near-dead in training data)
+// Dropped: thinking_length (zero outside DataClaw ~2.5% of windows — noise)
 const CONTINUOUS_FEATURES = [
   "steps_since_same_tool", "steps_since_same_file", "steps_since_same_cmd",
   "tool_count_in_window", "file_count_in_window", "cmd_count_in_window",
   "output_similarity", "has_prior_output", "output_length", "is_error", "step_index_norm",
-  "thinking_length",
 ];
 
+// Dropped: output_diversity (redundant with output_similarity_avg)
 const WINDOW_FEATURES = [
   "unique_tools_ratio", "unique_files_ratio", "unique_cmds_ratio",
-  "error_rate", "output_similarity_avg", "output_diversity",
+  "error_rate", "output_similarity_avg",
 ];
 
 // Regex patterns
@@ -243,19 +244,9 @@ export class StuckDetectorState {
     const errorRate = window.reduce((a, s) => a + s.is_error, 0) / window.length;
     const outputSimAvg = window.reduce((a, s) => a + s.output_similarity, 0) / window.length;
 
-    // Output diversity: unique lines / total lines across all outputs
-    const allLines = [];
-    for (const s of window) {
-      if (s.output_set) {
-        for (const line of s.output_set) allLines.push(line);
-      }
-    }
-    const outputDiversity = allLines.length > 0
-      ? new Set(allLines).size / allLines.length : 1.0;
-
     const windowFeatures = [
       uniqueToolsRatio, uniqueFilesRatio, uniqueCmdsRatio,
-      errorRate, outputSimAvg, outputDiversity,
+      errorRate, outputSimAvg,
     ];
 
     return { toolIndices, continuous, windowFeatures };
