@@ -28,11 +28,11 @@ MODEL_DIR = 'proxy'
 ALL_FEATURES = [
     'steps_since_same_tool', 'steps_since_same_file', 'steps_since_same_cmd',
     'tool_count_in_window', 'file_count_in_window', 'cmd_count_in_window',
-    'output_similarity', 'output_length', 'is_error', 'step_index_norm',
+    'output_similarity', 'has_prior_output', 'output_length', 'is_error', 'step_index_norm',
     'false_start', 'strategy_change', 'circular_lang',
     'thinking_length', 'self_similarity',
 ]
-KEEP_IDX = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13]  # 11 features incl. thinking_length
+KEEP_IDX = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14]  # 12 features incl. has_prior_output, thinking_length
 KEEP_FEATURES = [ALL_FEATURES[i] for i in KEEP_IDX]
 NUM_CONTINUOUS = len(KEEP_FEATURES)
 

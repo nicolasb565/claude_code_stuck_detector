@@ -88,6 +88,7 @@ def create_windows(abstract_seq, trajectory_id, parsed_steps=None):
                 'file_count_in_window': s['file_count_in_window'],
                 'cmd_count_in_window': s['cmd_count_in_window'],
                 'output_similarity': s['output_similarity'],
+                'has_prior_output': 1.0 if s.get('has_prior_output') else 0.0,
                 'output_length': s['output_length'],
                 'is_error': 1.0 if s['is_error'] else 0.0,
                 'step_index_norm': s['step_index_norm'],

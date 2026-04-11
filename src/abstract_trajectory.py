@@ -91,7 +91,7 @@ def normalize_to_set(output):
 def jaccard(current_set, previous_set):
     """Jaccard similarity between two frozensets."""
     if previous_set is None:
-        return 0.5  # no comparison available — neutral midpoint
+        return 0.0  # no prior output — has_prior_output=0 flags this as missing
     if not current_set and not previous_set:
         return 1.0
     union = current_set | previous_set
@@ -195,6 +195,7 @@ def abstract_trajectory(parsed_steps):
 
         # Output normalization and similarity
         output_set = normalize_to_set(output)
+        has_prior = output_history.get(cmd_hash) is not None
         output_sim = jaccard(output_set, output_history.get(cmd_hash))
 
         # Lookback features (normalized by total steps)
@@ -217,6 +218,7 @@ def abstract_trajectory(parsed_steps):
 
             # Output
             'output_similarity': output_sim,
+            'has_prior_output': has_prior,
             'output_set': output_set,
             'output_length': math.log1p(output.count('\n') + 1 if output else 0),
             'is_error': has_error_indicators(output),

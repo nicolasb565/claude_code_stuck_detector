@@ -25,7 +25,7 @@ const TOOL_TO_IDX = Object.fromEntries(TOOL_NAMES.map((t, i) => [t, i]));
 const CONTINUOUS_FEATURES = [
   "steps_since_same_tool", "steps_since_same_file", "steps_since_same_cmd",
   "tool_count_in_window", "file_count_in_window", "cmd_count_in_window",
-  "output_similarity", "output_length", "is_error", "step_index_norm",
+  "output_similarity", "has_prior_output", "output_length", "is_error", "step_index_norm",
   "thinking_length",
 ];
 
@@ -98,7 +98,7 @@ function normalizeToSet(output) {
 }
 
 function jaccard(setA, setB) {
-  if (!setB) return 0.5; // neutral — no prior comparison
+  if (!setB) return 0.0; // no prior output — has_prior_output=0 flags this as missing
   if (setA.size === 0 && setB.size === 0) return 1.0;
   const union = new Set([...setA, ...setB]);
   if (union.size === 0) return 1.0;
@@ -161,6 +161,7 @@ export class StuckDetectorState {
     const cmdKey = tool === "bash" && cmd ? cmdSemanticKey(cmd) : cmd;
     const cmdHash = hash(cmdKey);
     const outputSet = normalizeToSet(output);
+    const hasPrior = this.outputHistory.has(cmdHash);
     const outputSim = jaccard(outputSet, this.outputHistory.get(cmdHash) || null);
 
     const totalSteps = Math.max(this.stepCount + 1, 1);
@@ -176,6 +177,7 @@ export class StuckDetectorState {
       file_count_in_window: countIn(fileHash, this.fileHashHistory) / Math.max(i + 1, 1),
       cmd_count_in_window: countIn(cmdHash, this.cmdHashHistory) / Math.max(i + 1, 1),
       output_similarity: outputSim,
+      has_prior_output: hasPrior ? 1.0 : 0.0,
       output_set: outputSet,
       output_length: Math.log1p(output ? output.split("\n").length : 0),
       is_error: output ? (ERROR_RE.test(output.slice(0, 2000)) ? 1.0 : 0.0) : 0.0,
