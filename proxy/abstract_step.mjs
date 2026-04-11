@@ -36,6 +36,13 @@ const WINDOW_FEATURES = [
 
 // Regex patterns
 const ERROR_RE = /error|traceback|exception|failed|failure|fatal|cannot|unable to|not found|permission denied|segmentation fault|FAIL|ModuleNotFoundError|ImportError|SyntaxError|TypeError|ValueError|KeyError|AttributeError|RuntimeError|FileNotFoundError/i;
+const SYSTEM_REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/gi;
+
+// Fix #3: strip system-reminder blocks injected by Claude Code
+function stripSystemReminders(output) {
+  if (!output || !output.includes("<system-reminder")) return output;
+  return output.replace(SYSTEM_REMINDER_RE, "");
+}
 const FALSE_START_RE = /\b(actually|wait|hmm|let me reconsider|on second thought)\b/i;
 const STRATEGY_RE = /\b(different approach|try another|instead|alternatively|let me try a different)\b/i;
 const CIRCULAR_RE = /\b(try again|let me try|one more time|retry|attempt again)\b/i;
@@ -158,11 +165,18 @@ export class StuckDetectorState {
     const filePath = input?.file_path || input?.path || null;
 
     const fileHash = hash(filePath);
-    const cmdKey = tool === "bash" && cmd ? cmdSemanticKey(cmd) : cmd;
+    // Fix #2: non-bash tools prefix tool name to avoid edit/view hash collision
+    const cmdKey = tool === "bash" && cmd ? cmdSemanticKey(cmd) : (cmd ? `${tool}:${cmd}` : "");
     const cmdHash = hash(cmdKey);
-    const outputSet = normalizeToSet(output);
-    const hasPrior = this.outputHistory.has(cmdHash);
-    const outputSim = jaccard(outputSet, this.outputHistory.get(cmdHash) || null);
+
+    // Fix #3: strip system-reminder blocks before output processing
+    const cleanOutput = stripSystemReminders(output);
+
+    // Fix #1: edit/create/submit outputs are a meaningless success string — treat as no output
+    const isEditTool = tool === "edit" || tool === "create" || tool === "submit";
+    const outputSet = isEditTool ? new Set() : normalizeToSet(cleanOutput);
+    const hasPrior = isEditTool ? false : this.outputHistory.has(cmdHash);
+    const outputSim = isEditTool ? 0.0 : jaccard(outputSet, this.outputHistory.get(cmdHash) || null);
 
     const totalSteps = Math.max(this.stepCount + 1, 1);
     const i = this.stepCount;
@@ -179,8 +193,8 @@ export class StuckDetectorState {
       output_similarity: outputSim,
       has_prior_output: hasPrior ? 1.0 : 0.0,
       output_set: outputSet,
-      output_length: Math.log1p(output ? output.split("\n").length : 0),
-      is_error: output ? (ERROR_RE.test(output.slice(0, 2000)) ? 1.0 : 0.0) : 0.0,
+      output_length: Math.log1p(cleanOutput ? cleanOutput.split("\n").length : 0),
+      is_error: cleanOutput ? (ERROR_RE.test(cleanOutput.slice(0, 2000)) ? 1.0 : 0.0) : 0.0,
       step_index_norm: i / Math.max(totalSteps - 1, 1),
       thinking_length: Math.log1p(thinking ? thinking.length : 0),
     };
@@ -189,7 +203,7 @@ export class StuckDetectorState {
     this.toolHistory.push(tool);
     this.fileHashHistory.push(fileHash);
     this.cmdHashHistory.push(cmdHash);
-    if (cmdHash !== null) this.outputHistory.set(cmdHash, outputSet);
+    if (cmdHash !== null && !isEditTool) this.outputHistory.set(cmdHash, outputSet);
     this.prevThinking = thinking;
     this.stepCount++;
     this.abstractSteps.push(step);

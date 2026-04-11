@@ -113,6 +113,15 @@ ERROR_PATTERNS = re.compile(
     r'|TypeError|ValueError|KeyError|AttributeError|RuntimeError|FileNotFoundError)',
     re.I)
 
+_SYSTEM_REMINDER_RE = re.compile(r'<system-reminder>.*?</system-reminder>', re.DOTALL | re.I)
+
+
+def strip_system_reminders(output):
+    """Remove <system-reminder>...</system-reminder> blocks injected by Claude Code."""
+    if not output or '<system-reminder' not in output:
+        return output
+    return _SYSTEM_REMINDER_RE.sub('', output)
+
 
 def has_error_indicators(output):
     if not output:
@@ -186,17 +195,29 @@ def abstract_trajectory(parsed_steps):
         thinking = step.get('thinking', '')
 
         # Hash file and command (bash uses semantic key for softer matching)
+        # Fix #2: non-bash tools prefix tool name to avoid edit/view hash collision
         file_hash = zlib.crc32(file_path.encode()) if file_path else None
         if tool == 'bash' and cmd:
             cmd_key = cmd_semantic_key(cmd)
             cmd_hash = zlib.crc32(cmd_key.encode()) if cmd_key else None
         else:
-            cmd_hash = zlib.crc32(cmd.encode()) if cmd else None
+            cmd_key = f'{tool}:{cmd}' if cmd else None
+            cmd_hash = zlib.crc32(cmd_key.encode()) if cmd_key else None
 
-        # Output normalization and similarity
-        output_set = normalize_to_set(output)
-        has_prior = output_history.get(cmd_hash) is not None
-        output_sim = jaccard(output_set, output_history.get(cmd_hash))
+        # Fix #3: strip system-reminder blocks before output processing
+        output = strip_system_reminders(output)
+
+        # Fix #1: edit/create/submit outputs are a meaningless success string — treat as no output
+        is_edit_tool = tool in ('edit', 'create', 'submit')
+        if is_edit_tool:
+            output_set = frozenset()
+            has_prior = False
+            output_sim = 0.0
+        else:
+            # Output normalization and similarity
+            output_set = normalize_to_set(output)
+            has_prior = output_history.get(cmd_hash) is not None
+            output_sim = jaccard(output_set, output_history.get(cmd_hash))
 
         # Lookback features (normalized by total steps)
         norm = max(total_steps, 1)
@@ -237,7 +258,7 @@ def abstract_trajectory(parsed_steps):
         tool_history.append(tool)
         file_hash_history.append(file_hash)
         cmd_hash_history.append(cmd_hash)
-        if cmd_hash is not None:
+        if cmd_hash is not None and not is_edit_tool:
             output_history[cmd_hash] = output_set
         prev_thinking = thinking
 
