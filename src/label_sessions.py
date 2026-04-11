@@ -161,6 +161,7 @@ def create_windows(abstract_seq, trajectory_id, parsed_steps=None):
             'trajectory_id': trajectory_id,
             'window_start':  start,
             'label':         label,          # placeholder; overwritten by reviewer
+            'label_source':  'heuristic',    # overwritten by review scripts
             'steps':         [_step_features(s) for s in window],
             'window_features': win_feats,
         }

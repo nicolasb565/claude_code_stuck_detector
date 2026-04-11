@@ -99,6 +99,7 @@ def merge(source):
                 if label in ('STUCK', 'PRODUCTIVE') and rid in items:
                     full_window = items[rid].get('_full_window', {})
                     full_window['label'] = label
+                    full_window['label_source'] = 'sonnet'
                     resolved.append(full_window)
                 elif label == 'UNCLEAR' and rid in items:
                     item = items[rid].copy()
@@ -115,16 +116,25 @@ def merge(source):
             f.write(json.dumps(w) + '\n')
     print(f"  Appended {len(resolved)} windows to {labeled_file}")
 
-    # Write escalated items for Opus
+    # Write escalated items for Opus (start after any existing batches to avoid overwrite)
     if escalated:
+        existing = [
+            f for f in os.listdir(ESCALATE_DIR)
+            if f.startswith(f'{source}_batch_') and f.endswith('.jsonl')
+        ]
+        next_batch = max(
+            (int(f.rsplit('_', 1)[-1].replace('.jsonl', '')) for f in existing),
+            default=-1
+        ) + 1
         n_batches = 0
         for i in range(0, len(escalated), BATCH_SIZE):
             batch = escalated[i:i + BATCH_SIZE]
-            out   = os.path.join(ESCALATE_DIR, f'{source}_batch_{n_batches:04d}.jsonl')
+            out   = os.path.join(ESCALATE_DIR, f'{source}_batch_{next_batch:04d}.jsonl')
             with open(out, 'w') as f:
                 for item in batch:
                     f.write(json.dumps(item) + '\n')
-            n_batches += 1
+            next_batch += 1
+            n_batches  += 1
         print(f"  Wrote {n_batches} Opus batches to {ESCALATE_DIR}/")
         print(f"\nNext: run Opus review agents on {ESCALATE_DIR}/{source}_batch_*.jsonl")
         print(f"      Results expected in: data/review/results/opus/{source}_batch_*.jsonl")

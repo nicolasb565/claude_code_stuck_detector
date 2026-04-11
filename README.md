@@ -99,28 +99,53 @@ A 2,605-parameter CNN trained on 85,416 labeled windows from real Claude Code se
 
 **Held-out tasks** (6 tasks, never seen in training): **all clean**.
 
+### Data Generation Pipeline
+
+```
+Claude Code sessions (.jsonl)
+    │
+    │  python src/label_sessions.py <source> <sessions.jsonl>
+    ▼
+Abstract to numeric features (CRC32 semantic key, Jaccard output similarity)
+    │
+    ▼
+Heuristic classifier (high-precision rules)
+    │
+    ├── PRODUCTIVE → data/sources/<source>_labeled.jsonl   (numeric only)
+    └── CANDIDATE  → data/review/batches/<source>_batch_*.jsonl
+                         (includes raw cmd/output snippets for review)
+    │
+    │  [Run Sonnet review agents on batch files]
+    │  python src/review_sonnet.py <source>
+    ▼
+Sonnet decisions
+    ├── PRODUCTIVE → appended to labeled file
+    ├── STUCK      → appended to labeled file
+    └── UNCLEAR    → data/review/escalated/<source>_batch_*.jsonl
+    │
+    │  [Run Opus review agents on escalated files]
+    │  python src/review_opus.py <source>
+    ▼
+Opus decisions
+    ├── PRODUCTIVE / STUCK → appended to labeled file
+    └── UNCLEAR            → dropped (Opus is final arbiter)
+    │
+    ▼
+data/sources/<source>_labeled.jsonl  →  gzip  →  merge_sources.py
+```
+
+**Privacy guarantee:** The final `.gz` contains only numeric features (tool indices, timing ratios, similarity scores). Raw commands, file paths, output text, and LLM review comments are stripped at the `_full_window` boundary in `label_sessions.py`. Sessions on proprietary codebases can be labeled and contributed without leaking sensitive content.
+
 ### Training Pipeline
 
 ```
-Claude Code sessions (nlile 16.8K + DataClaw 136 + work_embedded_c)
-    │
-    │ Parse with cmd_semantic_key: 'cd build && make -j8 | tail' → 'make'
-    ▼
-Abstract to features (CRC32 of semantic key, Jaccard output similarity)
-    │
-    ▼
-Deterministic labeling (STUCK / PRODUCTIVE / UNCLEAR rules)
-    │
-    │ PRODUCTIVE → written directly to labeled file (high-precision rules)
-    │ STUCK      → written to labeled file, then Sonnet-verified
-    │ UNCLEAR    → Sonnet review batches (raw command/output text)
-    │                → still UNCLEAR after Sonnet → Opus
-    │                → still UNCLEAR after Opus → dropped
-    ▼
 85,416 labeled windows (770 STUCK, all Sonnet-confirmed)
     │ DataClaw oversampled 5x (physical duplication)
     ▼
 Train CNN (class-balanced BCEWithLogitsLoss, early stopping on test F1)
+    │  python src/train_cnn_oversample.py
+    ▼
+proxy/cnn_weights.json + proxy/cnn_config.json
 ```
 
 ### Key Innovations

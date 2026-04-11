@@ -100,6 +100,7 @@ def merge(source):
                 if label in ('STUCK', 'PRODUCTIVE') and rid in items:
                     full_window = items[rid].get('_full_window', {})
                     full_window['label'] = label
+                    full_window['label_source'] = 'opus'
                     resolved.append(full_window)
                 # UNCLEAR → dropped (no further escalation)
 
