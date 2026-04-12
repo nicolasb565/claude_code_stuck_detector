@@ -177,7 +177,7 @@ Label encoding: `PRODUCTIVE=0.0`, `UNSURE=0.5`, `STUCK=1.0`.
 
 ### `src/label_session.py`
 
-Labels one session using `claude -p` with full sequential context.
+Labels one session using the Anthropic SDK (Message Batches API).
 
 **Input:** path to a human-readable session transcript (JSON array of steps
 with tool name, cmd, file, output snippet)
@@ -188,11 +188,28 @@ with tool name, cmd, file, output snippet)
 re-label.
 
 **Prompt contract:**
-- System prompt explains the PRODUCTIVE / STUCK / UNSURE definitions
-- User message contains the full transcript + explicit step count
-- Instructs the model: "output a JSON array of exactly N strings"
-- Python validates `len(labels) == n_steps` before writing; retries once on
-  mismatch before marking the session as failed
+- System prompt explains the PRODUCTIVE / STUCK / UNSURE definitions — keep
+  short (~500 tokens); it is sent with every request
+- User message contains the full transcript + explicit step count; tool outputs
+  truncated to 500 chars to minimize input tokens
+- Output format: compact CSV `P,S,U,P,P,S` (single chars, comma-separated) —
+  ~7x fewer output tokens than JSON array of strings
+- Python splits on commas, maps `P→PRODUCTIVE`, `S→STUCK`, `U→UNSURE`
+- Validates `len(labels) == n_steps` before writing
+
+**API strategy:**
+- Uses Anthropic Message Batches API (50% discount, separate rate limits)
+- One batch request per session — Sonnet sees full sequential context
+- Batches submitted via `src/batch_label.py` (see Orchestrator section)
+- Output tokens are cheap; input token compression is the main cost lever
+
+**Cost estimate:**
+- ~100–150 tokens/step after transcript compression (vs 338 in pilot)
+- 1,000 nlile sessions × 50 steps × 125 tokens = ~6.25M input tokens
+- All sources: ~71,000 steps × 125 tokens = ~8.9M input tokens
+- At batch pricing ($1.50/MTok input, $7.50/MTok output):
+  ~$13–16 total for the full dataset
+- Run 5 sessions first to calibrate actual cost before full batch
 
 **CLI:**
 ```
@@ -238,6 +255,44 @@ python src/merge_session.py --labels <path> --features <path> --out <path>
 
 ---
 
+### `src/batch_label.py`
+
+Submits pending sessions to the Anthropic Message Batches API and retrieves
+results. Decoupled from the orchestrator so it can be run independently.
+
+**Behavior:**
+1. Scan `data/labels/<source>/` — collect sessions without a complete label file
+2. Generate transcripts for pending sessions (tool outputs truncated to 500 chars)
+3. Submit up to 10,000 requests per batch (one request per session)
+4. Poll until batch completes (up to 24 hours) or save `batch_id` to
+   `data/labels/<source>/pending_batch.json` and exit — re-running resumes
+5. On completion, parse each response (CSV `P,S,U,...`), validate
+   `len(labels) == n_steps`, write label file
+6. Sessions that fail validation are marked `failed` and excluded from the
+   batch result — re-running will resubmit them
+
+**Resume / rate-limit safety:**
+- If a batch is already in-flight (`pending_batch.json` exists), skip
+  submission and go straight to polling/retrieval
+- Sessions with existing complete label files are never resubmitted
+- If the API credit limit is hit mid-batch, the batch continues server-side
+  (Anthropic processes it async); re-running after topping up retrieves results
+
+**Cost calibration run:**
+```
+python src/batch_label.py datasets/nlile/ --max-sessions 5 --dry-run-estimate
+```
+Prints estimated token count and cost for 5 sessions before submitting,
+so you can calibrate the full-run cost before committing credits.
+
+**CLI:**
+```
+python src/batch_label.py datasets/nlile/ datasets/dataclaw_claude/
+python src/batch_label.py datasets/nlile/ --max-sessions 5   # cost calibration
+```
+
+---
+
 ### `src/orchestrate.py`
 
 Drives the full pipeline for a list of source directories. This is the main
@@ -246,17 +301,14 @@ entry point for dataset generation.
 **Inputs:**
 - One or more source directories, each containing `fetch.json` and
   `filter.json`
-- `--workers N` for parallel labeling (default: 5)
 - `--force-relabel` to ignore existing label files
 - `--schema-version N` to trigger feature re-extraction for stale files
 
 **Behavior:**
 1. Read `fetch.json` — download raw sessions if not already present
 2. Read `filter.json` — select sessions matching criteria
-3. Load `progress.json` if it exists — skip already-completed sessions
-4. For each pending session (in parallel up to `--workers`):
-   - Generate transcript if not cached
-   - Run `label_session.py` (skip if label file exists and is complete)
+3. Run `batch_label.py` — submit/retrieve labels for all pending sessions
+4. For each labeled session:
    - Run `extract_features.py` (skip if feature file is current and complete)
    - Run `merge_session.py`
    - Mark session as `done` in progress file immediately on success
@@ -264,10 +316,10 @@ entry point for dataset generation.
 5. Write `data/generated/<source>_v<N>.jsonl` from all completed sessions
 6. Print summary: done / failed / pending
 
-**Resume behavior:** re-running the orchestrator with the same arguments
-resumes from where it left off. Only `pending` and `failed` sessions are
-processed. Pass `--retry-failed` to retry previously failed sessions.
-Pass `--force-relabel` to re-label all sessions from scratch.
+**Resume behavior:** re-running with the same arguments resumes from where
+it left off. Sessions with existing label files and feature files are skipped.
+In-flight batches are detected via `pending_batch.json` and polled rather than
+resubmitted. Pass `--retry-failed` to resubmit previously failed sessions.
 
 **Progress tracking** — `data/generated/<source>_progress.json`:
 ```json
@@ -285,7 +337,7 @@ Pass `--force-relabel` to re-label all sessions from scratch.
 
 **CLI:**
 ```
-python src/orchestrate.py datasets/nlile/ datasets/dataclaw/ --workers 10
+python src/orchestrate.py datasets/nlile/ datasets/dataclaw_claude/
 ```
 
 ---
