@@ -372,31 +372,35 @@ Deleting pending_batch.json — affected sessions will be resubmitted on next ru
 Then delete `pending_batch.json` and write label files for any requests that
 did complete before expiry. Re-running resubmits only the remaining sessions.
 
-*Per-request errors:*
-Individual requests within a completed batch can fail independently. On
-retrieval, check each request's `result.type` — if `errored`, inspect the
-error code and classify as recoverable or non-recoverable.
+*Retry with exponential backoff — HTTP-level calls only:*
+Batch submission and polling are quick synchronous HTTP calls where a transient
+529/500 typically resolves within seconds. Retry these with exponential backoff:
+- Up to 4 retries: delays of 1s, 2s, 4s, 8s (total ~15s max wait)
+- Retry on: `429`, `500`, `529`
+- Do not retry on: `400`, `401`, `402` (non-recoverable, fail immediately)
+- If all retries exhausted: abort with a clear error and non-zero exit code
 
-Recoverable (transient — re-run resubmits automatically):
-- `529 overloaded`, `500 server error` — transient backend issue
+*Per-request errors inside a completed batch:*
+These cannot be retried in-place — the batch is already done server-side and
+individual failed requests are final. Re-running the script is the mechanism:
+it submits a new batch containing only the unlabeled sessions.
+
+On retrieval, check each request's `result.type` — if `errored`, classify the
+error code:
+
+Recoverable (leave unlabeled, exit 0 — re-run resubmits automatically):
+- `529 overloaded`, `500 server error` — transient backend issue during processing
 - `429 rate limit` — will succeed when rate resets
 
-Non-recoverable (re-run won't help without intervention):
+Non-recoverable (leave unlabeled, abort with non-zero exit code):
 - `401 invalid API key` → ERROR: check ANTHROPIC_API_KEY in .env
 - `402 insufficient credits` → ERROR: top up your account at console.anthropic.com
 - `400 bad request` → ERROR: malformed transcript — bug in transcript generation
 
-For recoverable errors: leave sessions unlabeled, print a summary and exit normally
-— re-running will resubmit them in a new batch:
 ```
 WARNING: 8 sessions failed with transient errors (529 overloaded).
 Re-run to resubmit them automatically.
-```
 
-For non-recoverable errors: leave sessions unlabeled, print a specific actionable
-message, and **abort with a non-zero exit code** — re-running blindly would hit
-the same wall:
-```
 ERROR: 12 sessions failed with insufficient credits (402).
 Top up your account at console.anthropic.com, then re-run.
 ```
@@ -884,10 +888,15 @@ in any test. Tests must pass without `ANTHROPIC_API_KEY` set.
 - Resume: `pending_batch.json` present on startup → polls instead of resubmitting (mock)
 - Batch expired (status=`expired`): warning printed, `pending_batch.json` deleted,
   completed requests written, remaining sessions left unlabeled for resubmission (mock)
-- Recoverable per-request errors (529, 500, 429): warning printed, sessions left
-  unlabeled for resubmission, exit code 0 (mock)
-- Non-recoverable per-request errors (401, 402, 400): error message printed with
-  actionable guidance, exit code non-zero, successful sessions still written (mock)
+- HTTP 529 on batch submission: retried with exponential backoff, succeeds on
+  third attempt (mock)
+- HTTP 529 on batch submission: all 4 retries exhausted → abort with non-zero
+  exit code (mock)
+- HTTP 400/401/402 on submission: no retry, immediate abort (mock)
+- Recoverable per-request errors (529, 500, 429) in completed batch: warning
+  printed, sessions left unlabeled for resubmission, exit code 0 (mock)
+- Non-recoverable per-request errors (401, 402, 400) in completed batch: error
+  message printed with actionable guidance, exit code non-zero (mock)
 - Mix of recoverable and non-recoverable errors: non-recoverable takes priority,
   abort with non-zero exit code (mock)
 - Partial batch results: mix of succeeded/errored/expired requests handled correctly
