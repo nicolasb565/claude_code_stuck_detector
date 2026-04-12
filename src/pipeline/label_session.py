@@ -203,13 +203,7 @@ def parse_csv_labels(csv: str, n_steps: int) -> list[str]:
             raise ValueError(f"Unknown label character: {part!r}")
         labels.append(_LABEL_CHAR_MAP[key])
 
-    if len(labels) == n_steps + 1:
-        # Labeler occasionally appends one extra value — drop it.
-        labels = labels[:n_steps]
-    elif len(labels) == n_steps - 1:
-        # Labeler occasionally drops the last step — pad with UNSURE.
-        labels.append("UNSURE")
-    elif len(labels) != n_steps:
+    if len(labels) != n_steps:
         raise ValueError(f"Label count mismatch: got {len(labels)}, expected {n_steps}")
 
     return labels

@@ -281,6 +281,153 @@ class TestRetryBackoff:
                     assert exc_info.value.code == 1
 
 
+class TestCollectBatchResults:
+    def _make_success(self, session_id: str, csv: str):
+        from types import SimpleNamespace
+
+        block = SimpleNamespace(text=csv)
+        message = SimpleNamespace(content=[block])
+        result_inner = SimpleNamespace(type="succeeded", message=message)
+        return SimpleNamespace(custom_id=session_id, result=result_inner)
+
+    def _make_error(self, session_id: str, err_type: str):
+        from types import SimpleNamespace
+
+        error = SimpleNamespace(type=err_type)
+        result_inner = SimpleNamespace(type="errored", error=error)
+        return SimpleNamespace(custom_id=session_id, result=result_inner)
+
+    def test_good_response_written_and_returned(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            transcripts = {"sess_1": ("transcript", 3)}
+            client = MagicMock()
+            client.messages.batches.results.return_value = [
+                self._make_success("sess_1", "P,S,U"),
+            ]
+            from src.pipeline.batch_label import _collect_batch_results
+
+            results, failures = _collect_batch_results(
+                client, "batch_x", "test_src", tmpdir, transcripts
+            )
+            assert results["sess_1"] == ["PRODUCTIVE", "STUCK", "UNSURE"]
+            assert failures == []
+            assert os.path.exists(os.path.join(tmpdir, "sess_1_labels.json"))
+
+    def test_bad_csv_count_goes_to_failures(self):
+        """4 labels for a 3-step session must land in parse_failure_ids, not be dropped."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            transcripts = {"sess_bad": ("transcript", 3)}
+            client = MagicMock()
+            client.messages.batches.results.return_value = [
+                self._make_success("sess_bad", "P,S,U,P"),
+            ]
+            from src.pipeline.batch_label import _collect_batch_results
+
+            results, failures = _collect_batch_results(
+                client, "batch_x", "test_src", tmpdir, transcripts
+            )
+            assert results["sess_bad"] is None
+            assert "sess_bad" in failures
+
+    def test_off_by_one_still_fails(self):
+        """±1 mismatch must trigger retry, not silent accept."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            transcripts_short = {"sess_short": ("t", 3)}
+            transcripts_long = {"sess_long": ("t", 3)}
+            client = MagicMock()
+            client.messages.batches.results.return_value = [
+                self._make_success("sess_short", "P,S"),  # 2 for expected 3
+            ]
+            from src.pipeline.batch_label import _collect_batch_results
+
+            _, failures = _collect_batch_results(
+                client, "batch_x", "test_src", tmpdir, transcripts_short
+            )
+            assert "sess_short" in failures
+
+    def test_unknown_session_id_ignored(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            transcripts = {"sess_known": ("transcript", 2)}
+            client = MagicMock()
+            client.messages.batches.results.return_value = [
+                self._make_success("sess_known", "P,S"),
+                self._make_success("sess_unknown", "P"),
+            ]
+            from src.pipeline.batch_label import _collect_batch_results
+
+            results, _ = _collect_batch_results(
+                client, "batch_x", "test_src", tmpdir, transcripts
+            )
+            assert "sess_unknown" not in results
+
+    def test_non_recoverable_error_exits(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            transcripts = {"sess_1": ("t", 2)}
+            client = MagicMock()
+            client.messages.batches.results.return_value = [
+                self._make_error("sess_1", "billing_error"),
+            ]
+            from src.pipeline.batch_label import _collect_batch_results
+
+            with pytest.raises(SystemExit) as exc_info:
+                _collect_batch_results(
+                    client, "batch_x", "test_src", tmpdir, transcripts
+                )
+            assert exc_info.value.code == 1
+
+
+class TestRetryParseFailures:
+    def _make_success(self, session_id: str, csv: str):
+        from types import SimpleNamespace
+
+        block = SimpleNamespace(text=csv)
+        message = SimpleNamespace(content=[block])
+        result_inner = SimpleNamespace(type="succeeded", message=message)
+        return SimpleNamespace(custom_id=session_id, result=result_inner)
+
+    def test_retry_success_returns_labels(self):
+        """Session that failed first parse succeeds on retry — labels are returned."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            transcripts = {"sess_retry": ("transcript", 2)}
+            client = MagicMock()
+            client.messages.batches.results.return_value = [
+                self._make_success("sess_retry", "P,S"),
+            ]
+
+            with patch(
+                "src.pipeline.batch_label.submit_batch", return_value="batch_retry"
+            ), patch("src.pipeline.batch_label._get_client", return_value=client):
+                from src.pipeline.batch_label import _retry_parse_failures
+
+                results = _retry_parse_failures(
+                    client, "test_src", tmpdir, transcripts, ["sess_retry"]
+                )
+            assert results["sess_retry"] == ["PRODUCTIVE", "STUCK"]
+
+    def test_retry_still_failing_discards_and_warns(self, capsys):
+        """Session that fails parse again after retry is discarded with a warning."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            transcripts = {"sess_bad": ("transcript", 2)}
+            client = MagicMock()
+            # Retry also returns wrong count (3 for expected 2)
+            client.messages.batches.results.return_value = [
+                self._make_success("sess_bad", "P,S,U"),
+            ]
+
+            with patch(
+                "src.pipeline.batch_label.submit_batch", return_value="batch_retry"
+            ), patch("src.pipeline.batch_label._get_client", return_value=client):
+                from src.pipeline.batch_label import _retry_parse_failures
+
+                results = _retry_parse_failures(
+                    client, "test_src", tmpdir, transcripts, ["sess_bad"]
+                )
+            assert results["sess_bad"] is None
+            captured = capsys.readouterr()
+            assert "discarding" in captured.err
+            assert "sess_bad" in captured.err
+
+
 class TestDryRunEstimate:
     def test_dry_run_does_not_exit_process(self):
         """--dry-run-estimate must return {} without calling sys.exit.

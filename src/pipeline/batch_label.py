@@ -129,45 +129,21 @@ def submit_batch(
     return batch_id
 
 
-def poll_and_retrieve(  # pylint: disable=too-many-branches
+def _collect_batch_results(
+    client,
     batch_id: str,
     source: str,
     labels_dir: str,
     transcripts_by_id: dict[str, tuple[str, int]],
-) -> dict[str, list[str] | None]:
-    """Poll until done. Returns {session_id: labels_or_None}.
-
-    Args:
-        batch_id: Anthropic batch ID
-        source: source name
-        labels_dir: directory for label files
-        transcripts_by_id: {session_id: (transcript_text, n_steps)}
+) -> tuple[dict[str, list[str] | None], list[str]]:
+    """Collect results from a completed batch.
 
     Returns:
-        {session_id: list of label strings, or None if failed}
+        (results, parse_failure_ids) where results maps session_id to labels or None,
+        and parse_failure_ids lists sessions whose CSV response couldn't be parsed.
     """
-    client = _get_client()
-    poll_interval = 30
-
-    while True:
-        batch = _retry_call(client.messages.batches.retrieve, batch_id)
-        status = batch.processing_status
-
-        if status == "expired":
-            print(f"WARNING: batch {batch_id} expired", file=sys.stderr)
-            pending_path = os.path.join(labels_dir, "pending_batch.json")
-            if os.path.exists(pending_path):
-                os.unlink(pending_path)
-            break
-
-        if status == "ended":
-            break
-
-        print(f"Batch {batch_id} status: {status} — waiting {poll_interval}s...")
-        time.sleep(poll_interval)
-
-    # Collect results
     results: dict[str, list[str] | None] = {sid: None for sid in transcripts_by_id}
+    parse_failure_ids: list[str] = []
     non_recoverable_found = False
 
     for result in _retry_call(client.messages.batches.results, batch_id):
@@ -191,9 +167,10 @@ def poll_and_retrieve(  # pylint: disable=too-many-branches
                 results[session_id] = labels
             except ValueError as exc:
                 print(
-                    f"WARNING: could not parse labels for {session_id}: {exc}",
+                    f"INFO: parse failed for {session_id} ({exc}) — will retry",
                     file=sys.stderr,
                 )
+                parse_failure_ids.append(session_id)
         elif result.result.type == "errored":
             err = result.result.error
             err_type = getattr(err, "type", "unknown")
@@ -219,13 +196,103 @@ def poll_and_retrieve(  # pylint: disable=too-many-branches
                     file=sys.stderr,
                 )
 
+    if non_recoverable_found:
+        sys.exit(1)
+
+    return results, parse_failure_ids
+
+
+def _retry_parse_failures(
+    client,
+    source: str,
+    labels_dir: str,
+    transcripts_by_id: dict[str, tuple[str, int]],
+    failure_ids: list[str],
+) -> dict[str, list[str] | None]:
+    """Submit a small follow-up batch for sessions whose CSV couldn't be parsed.
+
+    Returns {session_id: labels_or_None} for the retried sessions only.
+    """
+    retry_transcripts = [
+        (sid, transcripts_by_id[sid][0], transcripts_by_id[sid][1])
+        for sid in failure_ids
+    ]
+    print(
+        f"Retrying {len(retry_transcripts)} session(s) with bad label counts...",
+        file=sys.stderr,
+    )
+    retry_batch_id = submit_batch(retry_transcripts, source, labels_dir)
+
+    retry_by_id = {sid: (text, n) for sid, text, n in retry_transcripts}
+    retry_results, still_failing = _collect_batch_results(
+        client, retry_batch_id, source, labels_dir, retry_by_id
+    )
+
+    for sid in still_failing:
+        print(
+            f"WARNING: discarding {sid} — label count mismatch after retry",
+            file=sys.stderr,
+        )
+
+    return retry_results
+
+
+def _poll_until_done(client, batch_id: str, labels_dir: str) -> None:
+    """Block until batch reaches terminal state, cleaning up pending file on expiry."""
+    poll_interval = 30
+    while True:
+        batch = _retry_call(client.messages.batches.retrieve, batch_id)
+        status = batch.processing_status
+
+        if status == "expired":
+            print(f"WARNING: batch {batch_id} expired", file=sys.stderr)
+            pending_path = os.path.join(labels_dir, "pending_batch.json")
+            if os.path.exists(pending_path):
+                os.unlink(pending_path)
+            return
+
+        if status == "ended":
+            return
+
+        print(f"Batch {batch_id} status: {status} — waiting {poll_interval}s...")
+        time.sleep(poll_interval)
+
+
+def poll_and_retrieve(
+    batch_id: str,
+    source: str,
+    labels_dir: str,
+    transcripts_by_id: dict[str, tuple[str, int]],
+) -> dict[str, list[str] | None]:
+    """Poll until done, collect results, retry any parse failures once.
+
+    Args:
+        batch_id: Anthropic batch ID
+        source: source name
+        labels_dir: directory for label files
+        transcripts_by_id: {session_id: (transcript_text, n_steps)}
+
+    Returns:
+        {session_id: list of label strings, or None if failed}
+    """
+    client = _get_client()
+
+    _poll_until_done(client, batch_id, labels_dir)
+
+    results, parse_failure_ids = _collect_batch_results(
+        client, batch_id, source, labels_dir, transcripts_by_id
+    )
+
+    if parse_failure_ids:
+        retry_results = _retry_parse_failures(
+            client, source, labels_dir, transcripts_by_id, parse_failure_ids
+        )
+        results.update(retry_results)
+
     # Clean up pending file
     pending_path = os.path.join(labels_dir, "pending_batch.json")
     if os.path.exists(pending_path):
         os.unlink(pending_path)
-
-    if non_recoverable_found:
-        sys.exit(1)
 
     return results
 

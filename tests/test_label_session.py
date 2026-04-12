@@ -185,33 +185,9 @@ class TestParseCsvLabels:
         with pytest.raises(ValueError, match="mismatch"):
             parse_csv_labels("", 3)
 
-    def test_off_by_one_extra_truncates(self):
-        """Labeler occasionally appends one extra value — must be silently dropped.
-
-        Observed in production: 307 labels returned for a 306-step session.
-        """
-        csv = ",".join(["P"] * 307)
-        result = parse_csv_labels(csv, 306)
-        assert len(result) == 306
-        assert result == ["PRODUCTIVE"] * 306
-
-    def test_off_by_one_missing_pads_unsure(self):
-        """Labeler occasionally drops the last step — must pad with UNSURE.
-
-        Observed in production: 57 labels returned for a 58-step session.
-        """
-        csv = ",".join(["P"] * 57)
-        result = parse_csv_labels(csv, 58)
-        assert len(result) == 58
-        assert result[-1] == "UNSURE"
-        assert result[:-1] == ["PRODUCTIVE"] * 57
-
-    def test_truncated_output_raises(self):
-        """max_tokens truncation produces many fewer labels than expected — must raise.
-
-        Observed in production: 512 labels returned for a 646-step session
-        due to max_tokens=1024 (now fixed to 4096).
-        """
-        csv = ",".join(["P"] * 512)
-        with pytest.raises(ValueError, match="mismatch"):
-            parse_csv_labels(csv, 646)
+    def test_any_count_mismatch_raises(self):
+        """Any label count != n_steps must raise — callers handle retry logic."""
+        for got, expected in [(307, 306), (57, 58), (512, 646)]:
+            csv = ",".join(["P"] * got)
+            with pytest.raises(ValueError, match="mismatch"):
+                parse_csv_labels(csv, expected)
