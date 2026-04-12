@@ -1,18 +1,17 @@
 {
-  "threshold": 0.96,
-  "model_stage": 1,
-  "total_params": 2605,
+  "threshold": 0.5,
+  "model_stage": 5,
+  "total_params": 1085,
   "metrics": {
-    "precision": 0.8474426807760141,
-    "recall": 0.881651376146789,
-    "f1": 0.8642086330935251,
-    "tp": 961,
-    "fp": 173,
-    "fn": 129,
-    "tn": 28886,
-    "threshold": 0.96
+    "precision": 0.9638703850062098,
+    "recall": 0.8585076427996782,
+    "f1": 0.9081431838731984,
+    "tp": 8537,
+    "fp": 25,
+    "fn": 2886,
+    "tn": 17805,
+    "threshold": 0.5
   },
-  "window_size": 10,
   "tool_embed_dim": 4,
   "num_continuous": 11,
   "continuous_features": [
@@ -28,12 +27,18 @@
     "is_error",
     "step_index_norm"
   ],
-  "window_features": [
-    "unique_tools_ratio",
-    "unique_files_ratio",
-    "unique_cmds_ratio",
-    "error_rate",
-    "output_similarity_avg"
-  ],
-  "dataclaw_oversample": 5
+  "step_features": [
+    "tool_idx",
+    "steps_since_same_tool",
+    "steps_since_same_file",
+    "steps_since_same_cmd",
+    "tool_count_in_window",
+    "file_count_in_window",
+    "cmd_count_in_window",
+    "output_similarity",
+    "has_prior_output",
+    "output_length",
+    "is_error",
+    "step_index_norm"
+  ]
 }

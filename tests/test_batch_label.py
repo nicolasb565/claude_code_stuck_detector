@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from src.pipeline.label_session import write_label_file
+from src.pipeline.batch_label import LABELER_MODEL, RETRY_LABELER_MODEL
 
 
 def _make_transcripts(n=3):
@@ -56,6 +57,46 @@ class TestSubmitBatch:
                 with open(pending_path) as f:
                     data = json.load(f)
                 assert data["batch_id"] == "batch_abc123"
+
+    def test_submit_default_model_is_labeler_model(self):
+        """submit_batch without model= must use LABELER_MODEL in every request."""
+        mock_batch = MagicMock()
+        mock_batch.id = "batch_default_model"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("src.pipeline.batch_label._get_client") as mock_get_client:
+                mock_client = _make_mock_client()
+                mock_client.messages.batches.create.return_value = mock_batch
+                mock_get_client.return_value = mock_client
+
+                from src.pipeline.batch_label import submit_batch
+
+                submit_batch(_make_transcripts(2), "nlile", tmpdir)
+
+                call_kwargs = mock_client.messages.batches.create.call_args.kwargs
+                for req in call_kwargs["requests"]:
+                    assert req["params"]["model"] == LABELER_MODEL
+
+    def test_submit_model_kwarg_overrides_default(self):
+        """submit_batch(model=X) must put X in each request's params, not LABELER_MODEL."""
+        mock_batch = MagicMock()
+        mock_batch.id = "batch_opus"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("src.pipeline.batch_label._get_client") as mock_get_client:
+                mock_client = _make_mock_client()
+                mock_client.messages.batches.create.return_value = mock_batch
+                mock_get_client.return_value = mock_client
+
+                from src.pipeline.batch_label import submit_batch
+
+                submit_batch(
+                    _make_transcripts(2), "nlile", tmpdir, model=RETRY_LABELER_MODEL
+                )
+
+                call_kwargs = mock_client.messages.batches.create.call_args.kwargs
+                for req in call_kwargs["requests"]:
+                    assert req["params"]["model"] == RETRY_LABELER_MODEL
 
     def test_submit_saves_session_n_steps_in_pending(self):
         """pending_batch.json must record session_n_steps so resume works correctly
@@ -646,6 +687,45 @@ class TestPollAndRetrieveRetry:
             f"(pos {retry_results_pos}); call_log: {call_log}"
         )
         assert results["sess_1"] == ["PRODUCTIVE", "STUCK", "UNSURE"]
+
+    def test_retry_submit_uses_opus_model(self):
+        """Retry batch must use claude-opus-4-6, not the default sonnet labeler.
+
+        Opus has better instruction-following for strict label counts, which is
+        the failure mode that triggers retries.
+        """
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = MagicMock()
+            client.messages.batches.retrieve.return_value = self._ended_status()
+            client.messages.batches.results.side_effect = [
+                iter([self._make_success("sess_1", "P,S,U,EXTRA")]),  # parse failure
+                iter([self._make_success("sess_1", "P,S,U")]),  # retry ok
+            ]
+            client.messages.batches.create.return_value = SimpleNamespace(
+                id="retry_batch_id"
+            )
+
+            with patch(
+                "src.pipeline.batch_label._get_client", return_value=client
+            ), patch(
+                "src.pipeline.batch_label.submit_batch", return_value="retry_batch_id"
+            ) as mock_submit:
+                from src.pipeline.batch_label import poll_and_retrieve
+
+                poll_and_retrieve(
+                    "main_batch",
+                    "nlile",
+                    tmpdir,
+                    {"sess_1": ("transcript", 3)},
+                )
+
+            mock_submit.assert_called_once()
+            assert mock_submit.call_args.kwargs.get("model") == RETRY_LABELER_MODEL, (
+                f"retry submit_batch must pass model={RETRY_LABELER_MODEL!r} to escalate "
+                "parse-failure retries to Opus"
+            )
 
     def test_retry_submit_uses_save_pending_false(self):
         """Retry's submit_batch must be called with save_pending=False.

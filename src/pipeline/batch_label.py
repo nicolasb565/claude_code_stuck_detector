@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 from src.pipeline.label_session import (
     LABELER_MODEL,
+    RETRY_LABELER_MODEL,
     SYSTEM_PROMPT,
     format_transcript,
     parse_csv_labels,
@@ -78,6 +79,7 @@ def submit_batch(
     source: str,
     labels_dir: str,
     save_pending: bool = True,
+    model: str | None = None,
 ) -> str:
     """Submit one batch. Returns batch_id.
 
@@ -87,11 +89,13 @@ def submit_batch(
         labels_dir: directory to save pending_batch.json
         save_pending: if True (default), write pending_batch.json for resume support.
             Pass False for retry batches to avoid clobbering the main batch's pending file.
+        model: model ID to use; defaults to LABELER_MODEL if not specified.
 
     Returns:
         batch_id string
     """
     client = _get_client()
+    labeler = model or LABELER_MODEL
 
     requests = []
     for session_id, transcript_text, _n_steps in transcripts:
@@ -99,7 +103,7 @@ def submit_batch(
             {
                 "custom_id": session_id,
                 "params": {
-                    "model": LABELER_MODEL,
+                    "model": labeler,
                     "max_tokens": 4096,
                     "system": SYSTEM_PROMPT,
                     "messages": [{"role": "user", "content": transcript_text}],
@@ -262,8 +266,9 @@ def _retry_parse_failures(
         file=sys.stderr,
     )
     # save_pending=False: do not clobber the main batch's pending_batch.json on disk.
+    # model=RETRY_LABELER_MODEL: escalate to Opus for better count compliance.
     retry_batch_id = submit_batch(
-        retry_transcripts, source, labels_dir, save_pending=False
+        retry_transcripts, source, labels_dir, save_pending=False, model=RETRY_LABELER_MODEL
     )
 
     # Poll until done before reading results — the batch is in_progress right after submit.
@@ -276,7 +281,7 @@ def _retry_parse_failures(
 
     for sid in still_failing:
         print(
-            f"WARNING: discarding {sid} — label count mismatch after retry",
+            f"WARNING: discarding {sid} — label count mismatch after {RETRY_LABELER_MODEL} retry",
             file=sys.stderr,
         )
 

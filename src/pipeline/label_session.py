@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 SCHEMA_VERSION = 1
 LABELER_MODEL = "claude-sonnet-4-6"
+RETRY_LABELER_MODEL = "claude-opus-4-6"
 
 SYSTEM_PROMPT = """You are labeling steps in a Claude Code session. Each step is one tool call.
 Classify each step as P (productive), S (stuck), or U (unsure).

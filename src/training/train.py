@@ -278,6 +278,23 @@ def train(  # pylint: disable=too-many-statements,too-many-locals,too-many-branc
     print(f"  F1:        {f1:.3f}")
     print(f"  TP={tp} FP={fp} FN={fn} TN={tn}")
 
+    stuck_scores = scores[binary_labels == 1]
+    neg_scores = scores[binary_labels == 0]
+    pcts = [50, 75, 90, 95, 99]
+    print("\n=== Score distribution ===")
+    print(f"  STUCK  (n={len(stuck_scores)}): " + "  ".join(
+        f"p{p}={np.percentile(stuck_scores, p):.3f}" for p in pcts
+    ))
+    print(f"  PRODUC (n={len(neg_scores)}): " + "  ".join(
+        f"p{p}={np.percentile(neg_scores, p):.3f}" for p in pcts
+    ))
+
+    print("\n=== Threshold sweep ===")
+    print(f"  {'t':>5}  {'P':>6}  {'R':>6}  {'F1':>6}  {'FP':>6}  {'FN':>6}")
+    for t in [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99]:
+        p, r, f, _, fp, fn, _ = metrics_at(scores, binary_labels, t)
+        print(f"  {t:>5.2f}  {p:>6.3f}  {r:>6.3f}  {f:>6.3f}  {fp:>6}  {fn:>6}")
+
     final_metrics = {
         "precision": float(prec),
         "recall": float(rec),
