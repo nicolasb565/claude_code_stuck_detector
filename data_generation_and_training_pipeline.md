@@ -641,7 +641,11 @@ tests/
   test_artifact_lifecycle.py
   test_filters.py
   test_training.py
+  test_integration.py
 ```
+
+All Batch API interactions use `unittest.mock` — no real API calls are made
+in any test. Tests must pass without `ANTHROPIC_API_KEY` set.
 
 ### What each test covers
 
@@ -649,23 +653,34 @@ tests/
 - Each parser produces the expected step format from its fixture session
 - Edge cases: empty tool output, missing fields, session below `min_steps`
 - `model_filter` excludes non-Claude sessions
+- Malformed session (truncated JSON, missing keys) is skipped with a warning, not a crash
+- Session with 0 tool calls handled correctly
 
-**`test_label_session.py`**
-- Transcript formatter caps tool output at 500 chars, appends `[...]`
+**`test_label_session.py` — transcript compression**
+- Tool output capped at 500 chars, `[...]` suffix appended when truncated
+- Output under 500 chars passed through unchanged, no `[...]` appended
+- Very long output (1MB+) does not OOM — truncation is applied before any string copy
 - Correct step count produced for a known fixture
 - Empty output handled gracefully
+- Total transcript size is within expected bounds after compression
 
-**`test_batch_label.py`**
+**`test_batch_label.py` — all Batch API calls mocked**
 - CSV `P,S,U,P` correctly maps to `PRODUCTIVE/STUCK/UNSURE`
-- Rejects response where `len(labels) != n_steps`
-- Handles whitespace/newlines in CSV response
-- Unknown characters raise an error
-- Batch API call itself is mocked — no real API calls in tests
+- Case-insensitive: `p,s,u` accepted
+- Whitespace and trailing newlines stripped before parsing
+- Trailing comma handled gracefully
+- `len(labels) != n_steps` triggers retry logic (mock returns correct count on second attempt)
+- Unknown characters in CSV raise an error
+- Sonnet returns JSON array instead of CSV — detected and rejected
+- Resume: `pending_batch.json` present on startup → polls instead of resubmitting (mock)
+- Credit limit hit: batch ID saved to `pending_batch.json`, re-run retrieves results (mock)
+- Partial batch results: failed sessions marked `failed`, successful ones written
 
 **`test_extract_features.py`**
 - Known fixture session produces expected feature values (regression test)
 - `schema_version` and `n_steps` written correctly
 - Idempotency: re-running produces identical output
+- Interrupted write (partial file): detected by `n_steps` mismatch, re-extracted
 
 **`test_merge_session.py`**
 - Matching label and feature files merge into correct JSONL rows
@@ -676,7 +691,9 @@ tests/
 **`test_migrate_features.py`**
 - v1→v2 migration produces expected fields
 - Chained v1→v3 applies both functions in order
-- Missing raw session falls back to default, not crash
+- Artifact with mixed `schema_version` rows (partially migrated) detected by `--verify`
+- Migration is idempotent — running v1→v2 twice does not corrupt rows
+- Missing raw session falls back to default value, not a crash
 - `--verify` detects inconsistent `n_steps` within a session
 
 **`test_artifact_lifecycle.py`**
@@ -684,16 +701,27 @@ tests/
 - Session already in artifact is skipped (idempotency)
 - Deleted raw file: artifact row preserved, warning logged
 - `--drop-missing` removes orphaned rows
+- Concurrent append safety: two writes do not corrupt the `.gz`
 
 **`test_filters.py`**
 - `min_steps`/`max_steps` excludes out-of-range sessions
 - `max_sessions` caps the count
 - `folder_limits` glob patterns match correctly
+- Empty source (0 sessions after filtering) fails with a clear error, not silently
 
 **`test_training.py`**
 - Training manifest loads with correct weights
 - Weighted sampler produces correct oversampling ratio
 - Label encoding consistent between merge output and training loader
+- Session-level train/test split: no session appears in both splits (no leakage)
+- Class balance reported correctly after weighted sampling
+- Training with an empty source (0 steps after filtering) fails with a clear error
+
+**`test_integration.py` — end-to-end**
+- Full `generate.py` pipeline on a synthetic source with fixture sessions
+- Verifies final `.jsonl` contains correct rows, labels, features, and step count
+- Re-running produces identical output (full pipeline idempotency)
+- New session added to source → re-running appends it, existing rows unchanged
 
 ---
 
