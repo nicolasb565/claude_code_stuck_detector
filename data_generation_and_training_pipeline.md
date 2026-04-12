@@ -4,12 +4,14 @@
 
 ```bash
 # Step 1 — generate labeled dataset (fetch → label → extract → merge)
-# Cost calibration first: runs 5 sessions and prints token/cost estimate
+# Set up API key first (copy .env.example → .env and fill in your key)
+cp .env.example .env   # then edit .env: ANTHROPIC_API_KEY=sk-ant-...
+
+# Cost calibration: runs 5 sessions and prints token/cost estimate
 python generate.py --max-sessions 5 --dry-run-estimate
 
 # Then run for real (idempotent — safe to re-run, resumes from where it left off)
-# Requires ANTHROPIC_API_KEY for the Batch API labeling step
-ANTHROPIC_API_KEY=... python generate.py
+python generate.py
 
 # Step 2 — train and evaluate
 python train.py --manifest training_manifest.json
@@ -508,7 +510,8 @@ internal company codebases, client work), the workflow is:
 ```bash
 # 1. Point fetch.json at local raw sessions with type=proprietary and artifact path
 # 2. Run generate.py normally — it labels, extracts features, and writes the .gz
-ANTHROPIC_API_KEY=... python generate.py datasets/work_embedded_c/
+#    (ANTHROPIC_API_KEY must be set in .env)
+python generate.py datasets/work_embedded_c/
 
 # 3. Commit the artifact — it contains only labels + features, no raw session content
 git add data/sources/work_embedded_c_labeled.jsonl.gz
@@ -555,7 +558,7 @@ Pass `--drop-missing` to explicitly remove orphaned rows from the artifact
 *Feature schema change with raw sessions available:*
 Re-extraction from raw sessions gives exact feature values. Run:
 ```bash
-ANTHROPIC_API_KEY=... python generate.py datasets/work_embedded_c/ --schema-version 2
+python generate.py datasets/work_embedded_c/ --schema-version 2
 ```
 `generate.py` detects sessions in the artifact with stale `schema_version`,
 checks if raw session files exist, and re-extracts features for those sessions.
