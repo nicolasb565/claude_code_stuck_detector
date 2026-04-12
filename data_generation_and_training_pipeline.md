@@ -180,8 +180,14 @@ with tool name, cmd, file, output snippet)
 
 **Output:** `data/labels/<source>/<session_id>_labels.json`
 
-**Idempotent:** if the label file already exists, skip. Pass `--force` to
-re-label.
+**Idempotent / validation:** on startup, if a label file exists:
+1. Parse it as JSON — if invalid (truncated write, corrupt file), delete and re-label.
+2. Check `len(labels) == n_steps` — if the count is wrong, delete and re-label.
+3. If both checks pass, skip (already complete).
+
+Re-labeling always submits the full session — Sonnet needs full context to label
+any step, so there is no partial completion for labels. Pass `--force` to force
+re-labeling even on a valid file.
 
 **Prompt contract:**
 - System prompt explains the PRODUCTIVE / STUCK / UNSURE definitions — keep
@@ -261,9 +267,17 @@ Computes per-step numeric features from a raw session. No LLM calls.
 
 **Output:** `data/features/<source>/<session_id>_features.json`
 
-**Idempotent:** skip if feature file exists, `schema_version` matches current,
-and `n_steps` in the file matches the session length (guards against partial
-writes from interrupted runs). Re-extract if any condition fails.
+**Idempotent / validation:** on startup, if a feature file exists:
+1. Parse it as JSON — if invalid (truncated write, corrupt file), delete and re-extract all steps.
+2. Check `len(steps) == n_steps` (expected step count from the raw session) — if
+   fewer steps are present, re-extract all steps from scratch. Feature extraction
+   is stateful (e.g. `steps_since_same_tool` depends on all prior steps), so
+   completing missing steps requires replaying from step 0 anyway.
+3. Check `schema_version` matches current — if stale, re-extract or migrate
+   (see Feature Migration).
+4. If all checks pass, skip (already complete).
+
+Pass `--force` to re-extract even on a valid file.
 
 **CLI:**
 ```
@@ -770,13 +784,17 @@ in any test. Tests must pass without `ANTHROPIC_API_KEY` set.
 - Malformed session (truncated JSON, missing keys) is skipped with a warning, not a crash
 - Session with 0 tool calls handled correctly
 
-**`test_label_session.py` — transcript compression**
+**`test_label_session.py` — transcript compression + file validation**
 - Tool output capped at 500 chars, `[...]` suffix appended when truncated
 - Output under 500 chars passed through unchanged, no `[...]` appended
 - Very long output (1MB+) does not OOM — truncation is applied before any string copy
 - Correct step count produced for a known fixture
 - Empty output handled gracefully
 - Total transcript size is within expected bounds after compression
+- Existing valid label file with correct count → skipped (no API call)
+- Existing label file with invalid JSON → deleted and re-labeled
+- Existing label file with wrong label count (too few) → deleted and re-labeled
+- `--force` flag → re-labels even when file is valid
 
 **`test_batch_label.py` — all Batch API calls mocked**
 - CSV `P,S,U,P` correctly maps to `PRODUCTIVE/STUCK/UNSURE`
@@ -793,8 +811,12 @@ in any test. Tests must pass without `ANTHROPIC_API_KEY` set.
 **`test_extract_features.py`**
 - Known fixture session produces expected feature values (regression test)
 - `schema_version` and `n_steps` written correctly
+- Existing valid feature file with correct step count and current schema → skipped
+- Existing feature file with invalid JSON → deleted and re-extracted from scratch
+- Existing feature file with fewer steps than the session → re-extracted from scratch
+- Existing feature file with stale `schema_version` → re-extracted (or migrated)
+- `--force` flag → re-extracts even when file is valid
 - Idempotency: re-running produces identical output
-- Interrupted write (partial file): detected by `n_steps` mismatch, re-extracted
 
 **`test_merge_session.py`**
 - Matching label and feature files merge into correct JSONL rows
