@@ -141,8 +141,9 @@ Computes per-step numeric features from a raw session. No LLM calls.
 
 **Output:** `data/features/<source>/<session_id>_features.json`
 
-**Idempotent:** skip if feature file exists and `schema_version` matches
-current. Re-extract automatically if version is stale.
+**Idempotent:** skip if feature file exists, `schema_version` matches current,
+and `n_steps` in the file matches the session length (guards against partial
+writes from interrupted runs). Re-extract if any condition fails.
 
 **CLI:**
 ```
@@ -184,13 +185,21 @@ entry point for dataset generation.
 **Behavior:**
 1. Read `fetch.json` — download raw sessions if not already present
 2. Read `filter.json` — select sessions matching criteria
-3. For each selected session (in parallel up to `--workers`):
+3. Load `progress.json` if it exists — skip already-completed sessions
+4. For each pending session (in parallel up to `--workers`):
    - Generate transcript if not cached
-   - Run `label_session.py` (skip if label file exists)
-   - Run `extract_features.py` (skip if feature file is current)
+   - Run `label_session.py` (skip if label file exists and is complete)
+   - Run `extract_features.py` (skip if feature file is current and complete)
    - Run `merge_session.py`
-4. Write `data/generated/<source>_v<N>.jsonl`
-5. Update `progress.json` with per-session status (done / pending / failed)
+   - Mark session as `done` in progress file immediately on success
+   - Mark session as `failed` on error, continue with remaining sessions
+5. Write `data/generated/<source>_v<N>.jsonl` from all completed sessions
+6. Print summary: done / failed / pending
+
+**Resume behavior:** re-running the orchestrator with the same arguments
+resumes from where it left off. Only `pending` and `failed` sessions are
+processed. Pass `--retry-failed` to retry previously failed sessions.
+Pass `--force-relabel` to re-label all sessions from scratch.
 
 **Progress tracking** — `data/generated/<source>_progress.json`:
 ```json
@@ -199,7 +208,10 @@ entry point for dataset generation.
   "done": 3241,
   "failed": 12,
   "pending": 1747,
-  "failed_sessions": ["nlile_abc...", ...]
+  "failed_sessions": [
+    {"session_id": "nlile_abc...", "error": "label mismatch: got 51 labels for 53 steps"},
+    ...
+  ]
 }
 ```
 
@@ -218,12 +230,24 @@ python src/orchestrate.py datasets/nlile/ datasets/dataclaw/ --workers 10
 {
   "min_steps": 30,
   "max_steps": 200,
-  "languages": ["rust", "python", "typescript", "javascript", "c", "cpp"],
-  "max_per_language": 1000,
   "max_sessions": 5000,
-  "require_stuck": false
+  "folder_limits": [
+    {"pattern": "nlile_parquet/data/train-0000*", "max": 500},
+    {"pattern": "nlile_parquet/data/train-0001*", "max": 500}
+  ]
 }
 ```
+
+**On language filtering:** detecting the programming language from a session
+transcript is not reliably feasible without inspecting file extensions in tool
+call arguments, which varies by session and may be absent. Language-based
+filtering requires a spike to determine feasibility for each source format.
+
+**Recommended approach for nlile:** use `folder_limits` with regex/glob
+patterns on parquet filenames, or `max_sessions` with random sampling, rather
+than language filtering. For sources where sessions map to known repos or
+folders, a `folder_limits` list provides coarse control over which subset is
+included.
 
 Selection is applied before labeling. The orchestrator logs how many sessions
 were filtered out and why.
@@ -349,13 +373,19 @@ python src/train.py --manifest training_manifest.json
 - ~3,100 params, ~22 µs/window inference in JS
 
 ### Next (v5) — temporal
-- Per-step classification with temporal context
-- Input: step features + last N window scores + last N fc1 activations
-- Drop `steps_since_*` features (replaced by temporal memory)
-- Small RNN or MLP temporal head on top of CNN
-- ~10,000–15,000 params, still fits in L2 cache
-- Training data: per-step labels from this pipeline (not windowed)
+- Per-step classification, no windowing
+- Input at step T: step features(T) + [score(T-1)...score(T-N)] + [features(T-1)...features(T-N)]
+- Previous scores and features carried in a small ring buffer — free to compute,
+  negligible memory
+- Drop `steps_since_*` features (replaced by direct access to previous step features)
+- Architecture: MLP or small CNN over the concatenated current + N previous
+  feature vectors, single sigmoid output per step
+- ~10,000–15,000 params, still fits in L2 cache, sub-microsecond per step
+- Training: sequences of (features, label) pairs per session; loss computed
+  per step; teacher forcing during training (use ground truth previous labels
+  rather than model predictions to avoid compounding errors)
+- Inference: stateful — model keeps a ring buffer of its own previous outputs
+  and feature vectors, updated after each tool call
 
-The per-step label format produced by this pipeline is directly compatible
-with both window-based and per-step model training — windowed training just
-groups consecutive step labels into a window label (majority vote or max).
+The per-step label format from this pipeline maps directly to this architecture
+with no additional processing.
