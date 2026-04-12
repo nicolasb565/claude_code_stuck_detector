@@ -615,6 +615,88 @@ python src/train.py --manifest training_manifest.json
 
 ---
 
+## Testing
+
+All tests use synthetic fixture sessions — no real parquet files, no API calls.
+Batch API calls are mocked. Run with:
+
+```bash
+./run_tests.sh        # runs: python -m pytest tests/ -v
+```
+
+### Structure
+
+```
+tests/
+  fixtures/                     # minimal synthetic sessions, one per parser format
+    nlile_session.json
+    dataclaw_session.json
+    claudeset_session.json
+  test_parsers.py
+  test_label_session.py
+  test_batch_label.py
+  test_extract_features.py
+  test_merge_session.py
+  test_migrate_features.py
+  test_artifact_lifecycle.py
+  test_filters.py
+  test_training.py
+```
+
+### What each test covers
+
+**`test_parsers.py`**
+- Each parser produces the expected step format from its fixture session
+- Edge cases: empty tool output, missing fields, session below `min_steps`
+- `model_filter` excludes non-Claude sessions
+
+**`test_label_session.py`**
+- Transcript formatter caps tool output at 500 chars, appends `[...]`
+- Correct step count produced for a known fixture
+- Empty output handled gracefully
+
+**`test_batch_label.py`**
+- CSV `P,S,U,P` correctly maps to `PRODUCTIVE/STUCK/UNSURE`
+- Rejects response where `len(labels) != n_steps`
+- Handles whitespace/newlines in CSV response
+- Unknown characters raise an error
+- Batch API call itself is mocked — no real API calls in tests
+
+**`test_extract_features.py`**
+- Known fixture session produces expected feature values (regression test)
+- `schema_version` and `n_steps` written correctly
+- Idempotency: re-running produces identical output
+
+**`test_merge_session.py`**
+- Matching label and feature files merge into correct JSONL rows
+- Mismatched `n_steps` raises an error
+- Label encoding: `PRODUCTIVE→0.0`, `STUCK→1.0`, `UNSURE→0.5`
+- Stale `schema_version` raises an error
+
+**`test_migrate_features.py`**
+- v1→v2 migration produces expected fields
+- Chained v1→v3 applies both functions in order
+- Missing raw session falls back to default, not crash
+- `--verify` detects inconsistent `n_steps` within a session
+
+**`test_artifact_lifecycle.py`**
+- New session appended to existing artifact
+- Session already in artifact is skipped (idempotency)
+- Deleted raw file: artifact row preserved, warning logged
+- `--drop-missing` removes orphaned rows
+
+**`test_filters.py`**
+- `min_steps`/`max_steps` excludes out-of-range sessions
+- `max_sessions` caps the count
+- `folder_limits` glob patterns match correctly
+
+**`test_training.py`**
+- Training manifest loads with correct weights
+- Weighted sampler produces correct oversampling ratio
+- Label encoding consistent between merge output and training loader
+
+---
+
 ## Model Architecture Roadmap
 
 ### Current (v4)
