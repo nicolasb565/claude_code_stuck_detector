@@ -237,17 +237,33 @@ Sonnet just sees shorter outputs, which is normal variation in real sessions.
 
 **Calibration — verify and tune the system prompt before the full run:**
 
-Run the 5-session calibration (`python generate.py --max-sessions 5`) and
-manually inspect the label files against the raw sessions:
+Run **5 sessions per source** (~25 sessions total, ~$0.25) before committing
+to the full run. Prefer sessions that contain at least one known stuck episode
+— the benchmark sessions are ideal since you already know where the loops are.
+
+```bash
+python generate.py datasets/nlile/          --max-sessions 5
+python generate.py datasets/dataclaw_claude/ --max-sessions 5
+python generate.py datasets/masterclass/    --max-sessions 5
+python generate.py datasets/claudeset/      --max-sessions 5
+```
+
+Manually inspect the label files against the raw sessions for each source:
 - Are STUCK transitions happening at the right step, or too early / too late?
 - Is UNSURE appearing at all? If so, on what kind of steps?
 - Are any clearly repetitive steps labeled PRODUCTIVE?
 - Are any clearly novel steps labeled STUCK?
+- Are labels consistent in style across sources (same pattern, different language)?
+
+5 sessions per source matters because stuck episodes are rare (~5–15% of steps)
+— with a single source you might see only 1–2 stuck episodes, which is not enough
+to judge transition accuracy. Cross-source consistency also needs to be checked
+since Rust, Python, and PHP sessions look different on the surface.
 
 If the labels look wrong for a systematic reason, adjust the system prompt
 (tighten the transition rule, add or remove a pattern example) and re-run
-the calibration. Only commit API credits to the full run once the 5-session
-output looks correct.
+the calibration. Only commit API credits to the full run once the output
+looks correct across all sources.
 
 **API strategy:**
 - Uses Anthropic Message Batches API (50% discount, separate rate limits)
@@ -269,7 +285,7 @@ With a minimal system prompt (~500 tokens) as used in the Batch API:
 - Per step: ~**120 tokens/step** (vs 338 in the uncompressed pilot)
 - All sources: ~71,000 steps × 120 tokens = **~8.5M input tokens**
 - At batch pricing ($1.50/MTok input, $7.50/MTok output): **~$13 total**
-- Run 5 sessions first to calibrate actual cost before committing credits
+- Run 5 sessions per source first (~25 total, ~$0.25) to calibrate before committing credits
 
 **CLI:**
 ```
