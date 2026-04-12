@@ -184,3 +184,23 @@ class TestParseCsvLabels:
     def test_empty_string_raises(self):
         with pytest.raises(ValueError, match="mismatch"):
             parse_csv_labels("", 3)
+
+    def test_off_by_one_truncates_silently(self):
+        """Labeler occasionally appends one extra value — must be silently dropped.
+
+        Observed in production: 307 labels returned for a 306-step session.
+        """
+        csv = ",".join(["P"] * 307)
+        result = parse_csv_labels(csv, 306)
+        assert len(result) == 306
+        assert result == ["PRODUCTIVE"] * 306
+
+    def test_truncated_output_raises(self):
+        """max_tokens truncation produces many fewer labels than expected — must raise.
+
+        Observed in production: 512 labels returned for a 646-step session
+        due to max_tokens=1024 (now fixed to 4096).
+        """
+        csv = ",".join(["P"] * 512)
+        with pytest.raises(ValueError, match="mismatch"):
+            parse_csv_labels(csv, 646)
