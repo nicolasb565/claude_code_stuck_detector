@@ -615,13 +615,64 @@ python src/train.py --manifest training_manifest.json
 
 ---
 
+## Code Quality
+
+**Formatting — `black`**
+All Python files formatted with `black`. Non-negotiable, enforced by `run_tests.sh`.
+
+**Linting — `pylint`**
+Zero warnings enforced. Project-level `.pylintrc` committed to the repo to set
+consistent rules. `run_tests.sh` fails if pylint reports any warnings.
+
+**Type hints**
+All public functions have type annotations on parameters and return values.
+Makes the codebase readable and catches bugs early without a full type checker.
+
+**Dependencies**
+`requirements.txt` with pinned versions for reproducibility:
+```
+anthropic==...
+python-dotenv==...
+pyarrow==...
+torch==...
+numpy==...
+scikit-learn==...
+pytest==...
+black==...
+pylint==...
+```
+
+**API key — `.env`**
+`ANTHROPIC_API_KEY` is loaded from a `.env` file at script startup via
+`python-dotenv`. The file is listed in `.gitignore` and never committed.
+A `.env.example` is committed with the key name but no value:
+```
+ANTHROPIC_API_KEY=your_key_here
+```
+
+**Logging**
+`generate.py` runs for up to 24h — structured progress output is essential:
+- Session counts: pending / labeled / failed at each stage
+- Batch status: submitted, polling, retrieved
+- Cost estimate printed after transcript generation, before batch submission
+- Warnings for missing raw files, stale schema versions, label mismatches
+- Final summary: total steps, STUCK/PRODUCTIVE/UNSURE counts per source
+
+**Committed dataset configs**
+`datasets/` directory with `fetch.json` and `filter.json` for every source is
+committed to the repo. Without these, a user cloning the repo cannot reproduce
+the dataset generation. Raw session files referenced in `fetch.json` are not
+committed (too large / proprietary) but their expected paths are documented.
+
+---
+
 ## Testing
 
 All tests use synthetic fixture sessions — no real parquet files, no API calls.
 Batch API calls are mocked. Run with:
 
 ```bash
-./run_tests.sh        # runs: python -m pytest tests/ -v
+./run_tests.sh   # black --check, pylint, pytest tests/ -v — all must pass
 ```
 
 ### Structure
