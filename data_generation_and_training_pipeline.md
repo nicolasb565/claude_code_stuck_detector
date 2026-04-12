@@ -935,12 +935,18 @@ in any test. Tests must pass without `ANTHROPIC_API_KEY` set.
 - Each parser produces the expected step format from its fixture session
 - Edge cases: empty tool output, missing fields, session below `min_steps`
 - `model_filter` excludes non-Claude sessions
-- Malformed session (truncated JSON, missing keys) raises an exception — parsers
-  must never silently swallow errors. The caller (`generate.py`) catches the
-  exception, marks the session as `failed`, logs it, and continues with the
-  remaining sessions.
+- Parsers must never silently swallow errors — always raise with a descriptive
+  message. Two categories of failure:
+  - **Transient/recoverable** (truncated JSON, missing optional field, I/O error):
+    `generate.py` catches, marks session `failed`, logs it, continues. Re-running
+    may succeed.
+  - **Dataset schema issue** (unexpected turn structure, required field absent,
+    format deviation in a public dataset): parser raises a distinct exception type
+    (e.g. `ParserSchemaError`) that `generate.py` treats as non-recoverable —
+    logs prominently and aborts, because retrying won't help and silently skipping
+    would produce a smaller dataset than expected without any indication why.
 - `compact` turns (claudeset) produce no steps — session step count unaffected
-- Session with 0 tool calls raises an exception (not a valid training session)
+- Session with 0 tool calls raises a schema error (not a valid training session)
 
 **`test_label_session.py` — transcript compression + file validation**
 - Tool output capped at 500 chars, `[...]` suffix appended when truncated
