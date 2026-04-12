@@ -203,13 +203,21 @@ re-label.
 - Batches submitted via `src/batch_label.py` (see Orchestrator section)
 - Output tokens are cheap; input token compression is the main cost lever
 
-**Cost estimate:**
-- ~100–150 tokens/step after transcript compression (vs 338 in pilot)
-- 1,000 nlile sessions × 50 steps × 125 tokens = ~6.25M input tokens
-- All sources: ~71,000 steps × 125 tokens = ~8.9M input tokens
-- At batch pricing ($1.50/MTok input, $7.50/MTok output):
-  ~$13–16 total for the full dataset
-- Run 5 sessions first to calibrate actual cost before full batch
+**Cost estimate (validated by experiment):**
+
+Compression experiment on the 53-step pilot session:
+- Uncompressed transcript: ~41,740 tokens
+- Compressed transcript (500-char output cap): ~5,601 tokens — **87% reduction**
+- Label quality: **identical** — same PRODUCTIVE/STUCK split, same transition point
+- Subagent call total: 17,635 tokens, but ~11,900 of those were Claude Code system
+  prompt overhead (tool definitions etc.) — not present in Batch API calls
+
+With a minimal system prompt (~500 tokens) as used in the Batch API:
+- Per session: ~500 (system) + ~5,600 (transcript) + ~125 (output) ≈ **6,225 tokens**
+- Per step: ~**120 tokens/step** (vs 338 in the uncompressed pilot)
+- All sources: ~71,000 steps × 120 tokens = **~8.5M input tokens**
+- At batch pricing ($1.50/MTok input, $7.50/MTok output): **~$13 total**
+- Run 5 sessions first to calibrate actual cost before committing credits
 
 **CLI:**
 ```
