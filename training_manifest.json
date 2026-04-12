@@ -2,9 +2,9 @@
   "schema_version": 2,
   "datasets": [
     {"path": "data/generated/nlile_v2.jsonl",           "weight": 1.0},
-    {"path": "data/generated/dataclaw_claude_v2.jsonl", "weight": 5.0},
-    {"path": "data/generated/masterclass_v2.jsonl",     "weight": 3.0},
-    {"path": "data/generated/claudeset_v2.jsonl",       "weight": 3.0},
-    {"path": "data/generated/work_embedded_c_v2.jsonl", "weight": 3.0}
+    {"path": "data/generated/dataclaw_claude_v2.jsonl", "weight": 1.0},
+    {"path": "data/generated/masterclass_v2.jsonl",     "weight": 1.0},
+    {"path": "data/generated/claudeset_v2.jsonl",       "weight": 1.0},
+    {"path": "data/generated/work_embedded_c_v2.jsonl", "weight": 1.0}
   ]
 }
