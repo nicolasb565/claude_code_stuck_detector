@@ -269,9 +269,22 @@ pass through unchanged with no suffix.
 ```
 
 The key argument rendered per tool: `pattern` for Glob, `file_path` for Read,
-`cmd` for Bash, `todos` for TodoWrite, etc. Steps are numbered `[0]`, `[1]`,
-... to match the CSV output index. All source parsers produce a normalized step
+`cmd` for Bash, `todos` for TodoWrite, etc. For unknown tools, all key-value
+pairs from the input dict are rendered. Steps are numbered `[0]`, `[1]`, ...
+to match the CSV output index. All source parsers produce a normalized step
 format; the transcript formatter renders it identically regardless of source.
+
+`compact` turns (claudeset only) are rendered as unnumbered context blocks
+between step blocks — they are not labeled and do not consume a CSV index:
+```
+[compact: Agent summarized earlier file reads and concluded the bug is in
+the parser module. Proceeding with targeted edits.]
+
+[12] Edit
+  file_path: src/parser.rs
+  output: Applied edit successfully.
+```
+The step count reminder sent to Sonnet reflects only actual tool call steps.
 
 This format was validated experimentally: a 53-step session compressed to
 ~5,600 tokens (vs ~41,740 uncompressed), and labels were identical between
@@ -501,9 +514,18 @@ python generate.py datasets/nlile/ --max-sessions 5   # calibration run
 5. Print summary: done / failed / pending per source
 
 Note: the JSONL file is built incrementally by `merge_session.py` appending
-one session at a time — `generate.py` does not write it directly. Re-running
-skips already-merged sessions via the progress file, so no duplicate rows are
-written.
+one session at a time — `generate.py` does not write it directly. Sessions are
+processed **strictly sequentially** (no parallelism) so JSONL appends are safe
+without locking. Re-running skips already-merged sessions via the progress
+file, so no duplicate rows are written.
+
+`--dry-run-estimate` prints the token and cost estimate for all pending sessions
+then exits immediately — it does not continue into labeling or feature extraction.
+
+`--retry-failed` covers two categories of failure:
+- Labeling failures (session in Batch API errored): resubmit to the Batch API
+- Extraction/merge failures (session in progress file as `failed`): re-extract
+  features and re-merge locally. Labels are preserved if the label file is valid.
 
 **Resume behavior:** re-running with the same arguments resumes from where
 it left off. Sessions with existing valid label and feature files are skipped.
@@ -558,6 +580,11 @@ sampling. For sources where sessions map to known repos or folders, a
 `folder_limits` only applies to file-backed sources (`parquet`, `proprietary`)
 where sessions map to physical files. For `huggingface` sources it is ignored
 with a warning — use `max_sessions` instead to cap the session count.
+
+`max_sessions` selects a random subset using `seed=42` for reproducibility.
+Two runs on the same source with the same `max_sessions` always produce the
+same subset. Sessions are sorted by ID before sampling to ensure determinism
+regardless of filesystem or HuggingFace streaming order.
 
 Selection is applied before labeling. The orchestrator logs how many sessions
 were filtered out and why.
@@ -660,6 +687,10 @@ extraction entirely. The pipeline is:
 If a `filter.json` exists alongside a `labeled_gz` fetch.json, `generate.py`
 prints a warning so the user knows the filter has no effect.
 
+For `labeled_gz` sources there is no per-session pipeline and no progress file.
+Up-to-date check: if `data/generated/<source>_v<N>.jsonl` is newer than the
+artifact `.gz`, skip regeneration. Otherwise decompress → migrate → rewrite.
+
 ---
 
 ## Proprietary Dataset Workflow
@@ -696,7 +727,10 @@ git commit -m "data: migrate work_embedded_c artifact to schema v2"
 ```
 
 **Key properties of the `.gz` artifact:**
-- One row per step: `{session_id, step, schema_version, label, ...features}`
+- One row per step: `{session_id, step, schema_version, label, ...features}` —
+  identical to the merged JSONL row format with `schema_version` added.
+  When writing to `data/generated/<source>_v<N>.jsonl`, `schema_version` is
+  stripped (the training code doesn't need it; the JSONL version is in the filename).
 - `schema_version` is stored per-row (not per session). Mixed versions across
   rows (e.g. after a partial migration) are valid state detected by `--verify`.
 - Label provenance preserved: `label_source` field (`sonnet`, `heuristic`, etc.)
@@ -704,6 +738,13 @@ git commit -m "data: migrate work_embedded_c artifact to schema v2"
 - Committed to the repo — enables reproducibility without raw sessions
 - Written via temp-file-then-rename to ensure atomic updates (safe against
   crashes mid-write and concurrent invocations)
+- On machines where raw sessions are present (`type=proprietary`), the `.gz`
+  is written *in addition to* the normal per-session label/feature files. The
+  artifact is the authoritative "already done" record — if a session ID is in
+  the artifact, it is not relabeled even if label/feature files are missing.
+- If `type=proprietary` but raw session files are absent (e.g. any machine
+  other than the workstation), `generate.py` treats it as `labeled_gz` —
+  reads the artifact directly, logs a warning that raw files were not found.
 
 **Artifact lifecycle — handling new, deleted, and evolved sessions:**
 
@@ -1009,11 +1050,15 @@ in any test. Tests must pass without `ANTHROPIC_API_KEY` set.
 - `--verify` detects inconsistent `n_steps` within a session
 
 **`test_artifact_lifecycle.py`**
-- New session appended to existing artifact
+- Fixture: synthetic raw session files in a temp dir + a temp artifact path
+  created in test setup — no real parquet files needed
+- New session appended to existing artifact (full rewrite via temp-file-rename)
 - Session already in artifact is skipped (idempotency)
 - Deleted raw file: artifact row preserved, warning logged
 - `--drop-missing` removes orphaned rows
-- Concurrent append safety: two writes do not corrupt the `.gz`
+- Concurrent write safety: two processes writing to the same artifact path —
+  the temp-file-then-rename pattern ensures the last writer wins without
+  corruption (second rename atomically replaces the first)
 
 **`test_filters.py`**
 - `min_steps`/`max_steps` excludes out-of-range sessions
@@ -1059,10 +1104,12 @@ in any test. Tests must pass without `ANTHROPIC_API_KEY` set.
 - Inference: stateful — model keeps a ring buffer of its own previous outputs
   and feature vectors, updated after each tool call
 - Exposure bias mitigation: previous scores fed into the ring buffer are
-  quantized to the nearest of {0.0, 0.5, 1.0} (thresholds at 0.25 and 0.75)
-  before being stored, ensuring identical input distribution at training and
-  inference — ground truth labels are already in this set, so training is
-  unaffected
+  quantized to {0.0, 0.5, 1.0} before being stored, ensuring identical input
+  distribution at training and inference. Quantization rule:
+  `score <= 0.25 → 0.0 (PRODUCTIVE), score <= 0.75 → 0.5 (UNSURE), else → 1.0 (STUCK)`.
+  Thresholds chosen to match the label distribution in the training data.
+  UNSURE (0.5) is a valid ring buffer value at both training and inference —
+  ground truth labels are already in {0.0, 0.5, 1.0}, so training is unaffected
 
 The per-step label format from this pipeline maps directly to this architecture
 with no additional processing.
