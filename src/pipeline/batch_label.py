@@ -267,7 +267,7 @@ def _retry_parse_failures(
     )
 
     # Poll until done before reading results — the batch is in_progress right after submit.
-    _poll_until_done(client, retry_batch_id, labels_dir)
+    _poll_until_done(client, retry_batch_id)
 
     retry_by_id = {sid: (text, n) for sid, text, n in retry_transcripts}
     retry_results, still_failing = _collect_batch_results(
@@ -284,8 +284,13 @@ def _retry_parse_failures(
     return all_results
 
 
-def _poll_until_done(client, batch_id: str, labels_dir: str) -> None:
-    """Block until batch reaches terminal state, cleaning up pending file on expiry."""
+def _poll_until_done(client, batch_id: str) -> None:
+    """Block until batch reaches terminal state (ended or expired).
+
+    Pending-file cleanup is intentionally left to the caller — this function
+    must not touch any files so it is safe to call for retry batches that do
+    not own a pending file.
+    """
     poll_interval = 30
     while True:
         batch = _retry_call(client.messages.batches.retrieve, batch_id)
@@ -293,9 +298,6 @@ def _poll_until_done(client, batch_id: str, labels_dir: str) -> None:
 
         if status == "expired":
             print(f"WARNING: batch {batch_id} expired", file=sys.stderr)
-            pending_path = os.path.join(labels_dir, "pending_batch.json")
-            if os.path.exists(pending_path):
-                os.unlink(pending_path)
             return
 
         if status == "ended":
@@ -313,6 +315,11 @@ def poll_and_retrieve(
 ) -> dict[str, list[str] | None]:
     """Poll until done, collect results, retry any parse failures once.
 
+    Sessions whose CSV response cannot be parsed (wrong count, bad characters)
+    are retried once in a follow-up batch. Sessions that error at the API level
+    (overloaded, billing, etc.) or are absent from the results are returned as
+    None and are NOT retried — they will be re-labeled on the next pipeline run.
+
     Args:
         batch_id: Anthropic batch ID
         source: source name
@@ -320,11 +327,11 @@ def poll_and_retrieve(
         transcripts_by_id: {session_id: (transcript_text, n_steps)}
 
     Returns:
-        {session_id: list of label strings, or None if failed}
+        {session_id: list of label strings, or None if failed/missing}
     """
     client = _get_client()
 
-    _poll_until_done(client, batch_id, labels_dir)
+    _poll_until_done(client, batch_id)
 
     results, parse_failure_ids = _collect_batch_results(
         client, batch_id, source, labels_dir, transcripts_by_id

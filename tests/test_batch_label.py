@@ -397,6 +397,44 @@ class TestCollectBatchResults:
             captured = capsys.readouterr()
             assert "sess_missing" in captured.err
 
+    def test_all_three_cases_in_one_batch(self, capsys):
+        """Errored + parse-failed + truly-missing all handled correctly in one batch.
+
+        Regression guard: the seen_ids logic must keep all three cases distinct.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            transcripts = {
+                "sess_good": ("t", 2),
+                "sess_parse": ("t", 2),  # returns wrong count → parse failure
+                "sess_err": ("t", 2),  # returns errored result
+                "sess_miss": ("t", 2),  # not returned by API at all
+            }
+            client = MagicMock()
+            client.messages.batches.results.return_value = [
+                self._make_success("sess_good", "P,S"),
+                self._make_success("sess_parse", "P,S,U"),  # 3 for n=2
+                self._make_error("sess_err", "overloaded_error"),
+            ]
+            from src.pipeline.batch_label import _collect_batch_results
+
+            results, failures = _collect_batch_results(
+                client, "batch_x", "test_src", tmpdir, transcripts
+            )
+            assert results["sess_good"] == ["PRODUCTIVE", "STUCK"]
+            assert results["sess_parse"] is None
+            assert results["sess_err"] is None
+            assert results["sess_miss"] is None
+            assert failures == ["sess_parse"]
+            err = capsys.readouterr().err
+            # Only sess_miss should trigger the "missing from batch results" warning
+            assert "sess_miss" in err
+            assert "missing from batch results" in err
+            # sess_err and sess_parse appeared in the results — must NOT be warned as missing
+            for line in err.splitlines():
+                if "missing from batch results" in line:
+                    assert "sess_err" not in line
+                    assert "sess_parse" not in line
+
     def test_errored_session_not_warned_as_missing(self, capsys):
         """An errored session must NOT produce 'missing from batch results' warning.
 
@@ -649,6 +687,68 @@ class TestPollAndRetrieveRetry:
             assert mock_submit.call_args.kwargs.get("save_pending") is False, (
                 "retry submit_batch must pass save_pending=False to avoid "
                 "clobbering the main batch's pending file"
+            )
+
+    def test_retry_batch_expiry_does_not_delete_main_pending_file(self):
+        """If the retry batch expires, the main pending_batch.json must not be deleted.
+
+        Bug: _poll_until_done received labels_dir and deleted pending_batch.json on
+        any expiry, including retry batches which don't own that file.
+        Fix: pending-file cleanup removed from _poll_until_done; callers own it.
+        """
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Pre-write the main pending file (as run_batch_label would after submitting)
+            pending_path = os.path.join(tmpdir, "pending_batch.json")
+            with open(pending_path, "w") as f:
+                json.dump(
+                    {
+                        "batch_id": "main_batch",
+                        "source": "nlile",
+                        "session_n_steps": {"sess_1": 3},
+                    },
+                    f,
+                )
+
+            # Track whether the main pending file still exists when retry results are read
+            # (i.e. after _poll_until_done returned "expired" for the retry batch)
+            pending_state_after_retry_poll: list[bool] = []
+
+            client = MagicMock()
+
+            def retrieve_side_effect(batch_id):
+                if batch_id == "retry_batch_id":
+                    return SimpleNamespace(processing_status="expired")
+                return SimpleNamespace(processing_status="ended")
+
+            def results_side_effect(batch_id):
+                if batch_id == "retry_batch_id":
+                    # _poll_until_done for retry has returned; capture pending file state
+                    pending_state_after_retry_poll.append(os.path.exists(pending_path))
+                    return iter([])
+                return iter([self._make_success("sess_1", "P,S,U,EXTRA")])  # parse fail
+
+            client.messages.batches.retrieve.side_effect = retrieve_side_effect
+            client.messages.batches.results.side_effect = results_side_effect
+            client.messages.batches.create.return_value = SimpleNamespace(
+                id="retry_batch_id"
+            )
+
+            with patch("src.pipeline.batch_label._get_client", return_value=client):
+                from src.pipeline.batch_label import poll_and_retrieve
+
+                poll_and_retrieve(
+                    "main_batch",
+                    "nlile",
+                    tmpdir,
+                    {"sess_1": ("transcript", 3)},
+                )
+
+            # Main pending file must have existed when retry's expiry was processed
+            assert pending_state_after_retry_poll == [True], (
+                "Main pending_batch.json was deleted during retry expiry — "
+                "_poll_until_done must not clean up pending files"
             )
 
 
