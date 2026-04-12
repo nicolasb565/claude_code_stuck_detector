@@ -97,7 +97,7 @@ def submit_batch(
                 "custom_id": session_id,
                 "params": {
                     "model": LABELER_MODEL,
-                    "max_tokens": 1024,
+                    "max_tokens": 4096,
                     "system": SYSTEM_PROMPT,
                     "messages": [{"role": "user", "content": transcript_text}],
                 },
