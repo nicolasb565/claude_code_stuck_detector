@@ -28,6 +28,56 @@ Raw sessions
 
 ---
 
+## Data Sources
+
+All sources must be Claude Code sessions exclusively. Non-Claude sessions (Gemini,
+GPT, open-source models) use different tool call patterns and thinking block
+structures — mixing them adds noise and degrades generalization. The existing
+`dataclaw` source (woctordho/dataclaw, 453 sessions) is 85% non-Claude and is
+**replaced** by the two sources below.
+
+| Source | Type | Sessions | Primary languages | Notes |
+|---|---|---|---|---|
+| `nlile` | parquet (internal) | ~5,000 | Rust 96% | hyperswitch codebase |
+| `dataclaw_claude` | huggingface | 69 | C 40%, C++ 19%, Python 18% | Claude-only filter of woctordho/dataclaw |
+| `masterclass` | huggingface | 141 | Python 56%, HTML 10% | gutenbergpbc/john-masterclass-cc, ML research |
+| `work_embedded_c` | labeled_gz | ~2,590 | C (embedded) | proprietary, pre-labeled, no raw sessions |
+
+**Language coverage summary:** Rust (nlile), C/C++ (dataclaw_claude + work_embedded_c),
+Python (dataclaw_claude + masterclass). Missing: Go, TypeScript, Java — need new
+sources when available.
+
+**fetch.json for `dataclaw_claude`:**
+```json
+{
+  "type": "huggingface",
+  "repo": "woctordho/dataclaw",
+  "split": "train",
+  "parser": "dataclaw",
+  "model_filter": ["anthropic/claude-opus-4-6", "claude-opus-4-6",
+                   "anthropic/claude-sonnet-4-6", "claude-opus-4-5-20251101",
+                   "claude-haiku-4-5-20251001", "openrouter/anthropic/claude-opus-4.6"],
+  "description": "Claude-only sessions from woctordho/dataclaw (69/453 sessions)"
+}
+```
+
+**fetch.json for `masterclass`:**
+```json
+{
+  "type": "huggingface",
+  "repo": "gutenbergpbc/john-masterclass-cc",
+  "split": "train",
+  "parser": "dataclaw",
+  "description": "Claude Code ML research sessions — Python-heavy (gutenbergpbc/john-masterclass-cc)"
+}
+```
+
+The `model_filter` field in fetch.json is an optional allowlist of model strings.
+The orchestrator skips sessions whose `model` field is not in the list. Omit the
+field to accept all sessions (e.g. for sources that are already Claude-only).
+
+---
+
 ## Directory Layout
 
 ```
