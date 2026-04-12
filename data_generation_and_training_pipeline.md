@@ -3,26 +3,25 @@
 ## Quickstart (reproducing the model from scratch)
 
 ```bash
-# 1. Cost calibration — run 5 sessions, check estimated token cost before committing credits
-python src/batch_label.py datasets/nlile/ --max-sessions 5 --dry-run-estimate
+# Step 1 — generate labeled dataset (fetch → label → extract → merge)
+# Cost calibration first: runs 5 sessions and prints token/cost estimate
+python generate.py --max-sessions 5 --dry-run-estimate
 
-# 2. Label all sources (submits Batch API requests, polls until done — safe to re-run)
-python src/batch_label.py datasets/nlile/ datasets/dataclaw_claude/ \
-                          datasets/masterclass/ datasets/claudeset/
+# Then run for real (idempotent — safe to re-run, resumes from where it left off)
+# Requires ANTHROPIC_API_KEY for the Batch API labeling step
+ANTHROPIC_API_KEY=... python generate.py
 
-# 3. Extract features + merge into training files (idempotent, skips already-done sessions)
-python src/orchestrate.py datasets/nlile/ datasets/dataclaw_claude/ \
-                          datasets/masterclass/ datasets/claudeset/
-
-# 4. Train
-python src/train.py --manifest training_manifest.json
-
-# 5. Evaluate
-python src/eval_benchmark.py
+# Step 2 — train and evaluate
+python train.py --manifest training_manifest.json
 ```
 
-Steps 2 and 3 are safe to re-run at any time — they resume from where they left off.
-Set `ANTHROPIC_API_KEY` in your environment before step 2.
+`generate.py` submits labeling requests to the Anthropic Batch API (async, up to 24h),
+then extracts features and merges into training files once labels are retrieved.
+Re-running after an interruption or credit-limit hit resumes automatically.
+
+`train.py` reads the manifest, trains the model, and runs benchmark evaluation.
+Re-run this as many times as needed when tuning architecture or hyperparameters —
+it never touches the labeled dataset.
 
 ---
 
@@ -33,23 +32,23 @@ training are separate concerns that can evolve independently and be rerun in
 isolation. All stages are idempotent — safe to interrupt and resume.
 
 ```
-Raw sessions
+generate.py                         ← entry point for dataset generation
     │
-    ├── [fetch.json]  ──────────────────────── download / locate raw data
-    ├── [filter.json] ──────────────────────── select sessions for labeling
+    ├── [fetch.json]  ────────────── download / locate raw sessions
+    ├── [filter.json] ────────────── select sessions
     │
-    ├── src/batch_label.py   ───────────────── per-step labels via Batch API
-    ├── src/extract_features.py  ───────────── per-step features (pure computation)
+    ├── pipeline/batch_label.py ──── per-step labels via Anthropic Batch API
+    ├── pipeline/extract_features.py  per-step features (pure computation)
+    ├── pipeline/merge_session.py ─── zip labels + features → training rows
     │
-    ├── src/merge_session.py  ──────────────── zip labels + features → training rows
+    └── data/generated/<source>_v<N>.jsonl
+                │
+                └── training_manifest.json
+                            │
+train.py                    └──────── entry point for training + eval
     │
-    └── src/orchestrate.py  ────────────────── drives extract + merge after labeling
-            │
-            └── data/generated/<source>_v<N>.jsonl   (one file per source)
-                        │
-                        └── [training_manifest.json]
-                                    │
-                                    └── src/train.py
+    ├── training/train.py
+    └── training/eval_benchmark.py
 ```
 
 ---
@@ -583,16 +582,28 @@ pipeline files. They are replaced entirely by the new modules.
 
 ### New files to create
 
-| File | Purpose |
-|---|---|
-| `src/batch_label.py` | Batch API submission, polling, retrieval |
-| `src/label_session.py` | transcript formatter, label file writer |
-| `src/extract_features.py` | per-step numeric feature extraction |
-| `src/merge_session.py` | zip labels + features → training JSONL rows |
-| `src/orchestrate.py` | pipeline driver (features + merge after labeling) |
-| `src/migrate_features.py` | chained schema version migrations |
-| `src/parse_nlile.py` | nlile parquet parser (extracted from label_sessions.py) |
-| `src/parse_claudeset.py` | claudeset-community parser (different turn schema) |
+```
+src/
+  pipeline/               # Python package — dataset generation + labeling
+    __init__.py
+    batch_label.py        # Batch API submission, polling, retrieval
+    label_session.py      # transcript formatter, label file writer
+    extract_features.py   # per-step numeric feature extraction
+    merge_session.py      # zip labels + features → training JSONL rows
+    migrate_features.py   # chained schema version migrations
+    parsers/
+      __init__.py
+      nlile.py            # nlile parquet parser (from label_sessions.py)
+      dataclaw.py         # reuse/refactor src/parse_dataclaw.py
+      claudeset.py        # claudeset-community parser (different turn schema)
+  training/               # Python package — model training + evaluation
+    __init__.py
+    train.py              # renamed/updated from train_cnn_oversample.py
+    eval_benchmark.py     # unchanged
+
+generate.py               # entry point: fetch → label → extract → merge
+train.py                  # entry point: load manifest → train → eval
+```
 
 ### Cleanup timing
 
