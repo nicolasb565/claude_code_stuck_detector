@@ -19,9 +19,7 @@ import numpy as np
 WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), "stuck_weights.json")
 OUT_PATH = os.path.join(os.path.dirname(__file__), "test", "mlp_parity_vectors.json")
 
-INPUT_DIM = 53
-N_HISTORY = 5
-FEAT_DIMS = INPUT_DIM - N_HISTORY  # 48
+INPUT_DIM = 48  # no score history — every dim is a feature
 N_VECTORS = 100
 SEED = 42
 
@@ -35,7 +33,7 @@ def forward(weights: dict, inp: np.ndarray) -> float:
     mean = np.array(weights["norm_mean"], dtype=np.float32)
     std = np.array(weights["norm_std"], dtype=np.float32)
 
-    x = (inp - mean) / std  # norm_mean[48:]=0, norm_std[48:]=1 → score dims unchanged
+    x = (inp - mean) / std
 
     h1 = np.maximum(0.0, np.array(weights["fc1.weight"], dtype=np.float32) @ x
                     + np.array(weights["fc1.bias"], dtype=np.float32))

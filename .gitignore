@@ -23,4 +23,7 @@ proxy/benchmark_summary.json
 
 # Generated test fixtures (reproducible via generate_test_vectors.py)
 proxy/test/mlp_parity_vectors.json
+
+# Training experiment outputs (reproducible via train.py with flags)
+proxy/experiments/
 .env

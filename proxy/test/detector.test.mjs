@@ -25,7 +25,7 @@ describe('SessionDetector', () => {
     assert.equal(det._stepCount, 2)
   })
 
-  test('MLP receives input vector of length 53', () => {
+  test('MLP receives input vector of length 48', () => {
     let capturedLen = 0
     const capturingMLP = {
       forward: (input) => {
@@ -34,25 +34,29 @@ describe('SessionDetector', () => {
       },
     }
     new SessionDetector(capturingMLP).addStep('Bash', { command: 'ls' }, 'out')
-    assert.equal(capturedLen, 53)
+    assert.equal(capturedLen, 48)
   })
 
-  test('score from step N appears in T-1 slot for step N+1', () => {
-    const scores = []
-    let callIdx = 0
+  test('features from step N appear in T-1 slot for step N+1', () => {
+    const captured = []
     const trackingMLP = {
       forward: (input) => {
-        // Position 48 = first score dim (T-1 score)
-        scores.push(input[48])
-        return callIdx++ === 0 ? 0.9 : 0.5
+        // T-1 history slot is positions [8..16) — the previous step's features
+        captured.push(Array.from(input.slice(8, 16)))
+        return 0.5
       },
     }
     const det = new SessionDetector(trackingMLP)
-    det.addStep('Bash', { command: 'ls' }, '') // score=0.9 feeds into ring
-    det.addStep('Bash', { command: 'ls' }, '') // T-1 score should be 0.9
+    det.addStep('Bash', { command: 'ls' }, '')
+    det.addStep('Bash', { command: 'pwd' }, '')
 
-    assert.equal(scores[0], 0) // first step: ring is zero-padded
-    assert.ok(Math.abs(scores[1] - 0.9) < 1e-6) // second step: T-1 = first step's score (Float32 precision)
+    // First step: ring is zero-padded, T-1 slot is all zeros
+    assert.deepEqual(captured[0], new Array(8).fill(0))
+    // Second step: T-1 slot must be non-zero (carries step-0 features)
+    assert.ok(
+      captured[1].some((v) => v !== 0),
+      'T-1 slot should hold previous step features',
+    )
   })
 
   test('two independent instances have separate state', () => {

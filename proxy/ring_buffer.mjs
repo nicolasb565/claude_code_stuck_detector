@@ -1,12 +1,15 @@
 /**
- * Fixed-size ring buffer for N steps of feature vectors and scores.
+ * Fixed-size ring buffer for N steps of feature vectors.
  *
  * Mirrors the np.roll-based implementation in src/training/train.py:
  *   feat_buf = np.roll(feat_buf, 1, axis=0); feat_buf[0] = curr
- *   score_buf = np.roll(score_buf, 1); score_buf[0] = score
  *
  * Layout: buf[0] = T-1 (most recent), buf[N-1] = T-N (oldest).
  * All entries are zero-initialized (zero-padding for the first N steps).
+ *
+ * The previous-scores feedback channel was removed — it created a train/inference
+ * mismatch (training fed perfect labels, inference fed continuous sigmoid output)
+ * and ablation showed F1=0.961 with or without it, so the simpler 48-dim model wins.
  */
 
 export const N_HISTORY = 5
@@ -21,16 +24,14 @@ export class RingBuffer {
     this.n = n
     this.featureDim = featureDim
     this._feats = new Float32Array(n * featureDim) // zero-initialized
-    this._scores = new Float32Array(n) // zero-initialized
   }
 
   /**
    * Roll the buffer and insert the new step at position 0 (T-1 slot).
    *
    * @param {Float32Array} features  length-featureDim vector for the current step
-   * @param {number}       score     MLP score for the current step in [0, 1]
    */
-  push(features, score) {
+  push(features) {
     // Shift features right by one slot: [0..n-2] → [1..n-1]
     for (let i = this.n - 1; i > 0; i--) {
       const src = (i - 1) * this.featureDim
@@ -38,20 +39,13 @@ export class RingBuffer {
       this._feats.copyWithin(dst, src, src + this.featureDim)
     }
     this._feats.set(features.subarray(0, this.featureDim), 0)
-
-    // Shift scores right by one slot
-    for (let i = this.n - 1; i > 0; i--) {
-      this._scores[i] = this._scores[i - 1]
-    }
-    this._scores[0] = score
   }
 
   /**
    * Build the full MLP input vector for the current step.
    *
-   * Layout: [curr(featureDim), hist_T-1(featureDim), ..., hist_T-N(featureDim),
-   *          score_T-1, ..., score_T-N]
-   * Total length: featureDim * (1 + N) + N  →  8 * 6 + 5 = 53 for default params.
+   * Layout: [curr(featureDim), hist_T-1(featureDim), ..., hist_T-N(featureDim)]
+   * Total length: featureDim * (1 + N)  →  8 * 6 = 48 for default params.
    *
    * Called BEFORE push() so the ring contains T-1..T-N at this point.
    *
@@ -60,10 +54,9 @@ export class RingBuffer {
    */
   buildInput(currFeats) {
     const dim = this.featureDim
-    const result = new Float32Array(dim * (1 + this.n) + this.n)
+    const result = new Float32Array(dim * (1 + this.n))
     result.set(currFeats.subarray(0, dim), 0)
     result.set(this._feats, dim)
-    result.set(this._scores, dim * (1 + this.n))
     return result
   }
 }

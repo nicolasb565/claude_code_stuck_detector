@@ -4,9 +4,10 @@
  * Composes feature extraction, ring buffer history, and MLP inference into a
  * stateful object — one instance per active Claude Code session.
  *
- * Call addStep() once per tool call in order. The ring buffer score feedback
- * (each step's score is stored and fed back as input to subsequent steps) mirrors
- * inference-time behaviour described in src/training/train.py.
+ * Call addStep() once per tool call in order. The ring buffer holds the last
+ * N=5 per-step feature vectors; previous scores are NOT fed back (ablation
+ * showed identical F1 with or without them, and dropping them eliminates the
+ * train/inference distribution mismatch).
  */
 
 import { parseToolCall, computeFeatures } from './features.mjs'
@@ -36,7 +37,7 @@ export class SessionDetector {
     const features = computeFeatures(step, this._outputHistory, this._stepCount)
     const inputVec = this._ring.buildInput(features)
     const score = this._mlp.forward(inputVec)
-    this._ring.push(features, score)
+    this._ring.push(features)
     this._stepCount++
     return score
   }

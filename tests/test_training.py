@@ -155,6 +155,32 @@ class TestBuildSequences:
         with pytest.raises(KeyError):
             build_sequences(by_session)
 
+    def test_no_score_history_input_shape(self):
+        """With use_score_history=False the input dim drops to NUM_FEATURES*(1+N_HISTORY)."""
+        rows = _make_rows(n_sessions=2, steps_per_session=4)
+        by_session = {}
+        for r in rows:
+            by_session.setdefault(r["session_id"], []).append(r)
+
+        inputs, labels, _ = build_sequences(by_session, use_score_history=False)
+        expected_dim = NUM_FEATURES * (1 + N_HISTORY)  # 48
+        assert inputs.shape == (8, expected_dim)
+        assert labels.shape == (8,)
+
+    def test_no_score_history_omits_score_columns(self):
+        """The 5 trailing score columns must not appear when score history is disabled."""
+        rows = _make_rows(n_sessions=1, steps_per_session=4)
+        by_session = {"sess_000": rows}
+
+        with_scores, _, _ = build_sequences(by_session, use_score_history=True)
+        without_scores, _, _ = build_sequences(by_session, use_score_history=False)
+
+        # The first NUM_FEATURES*(1+N_HISTORY) columns must be identical
+        feat_only_dim = NUM_FEATURES * (1 + N_HISTORY)
+        np.testing.assert_array_equal(
+            with_scores[:, :feat_only_dim], without_scores
+        )
+
 
 class TestBuildSequencesRingBuffer:
     def test_t3_slot_holds_step0_features(self):

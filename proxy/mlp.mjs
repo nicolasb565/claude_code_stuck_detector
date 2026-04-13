@@ -1,18 +1,17 @@
 /**
- * v5 per-step MLP inference.
+ * v5 per-step MLP inference (no score history).
  *
- * Architecture: Linear(53,64) → ReLU → Linear(64,32) → ReLU → Linear(32,1) → Sigmoid
- * Normalization: mean/std applied to first 48 feature dims only.
- *                Last 5 dims (previous scores) are left in [0,1] — applying
- *                training-set stats would cause a train/inference mismatch because
- *                training scores are trimodal {0, 0.5, 1} while inference scores
- *                are continuous sigmoid outputs.
+ * Architecture: Linear(48,64) → ReLU → Linear(64,32) → ReLU → Linear(32,1) → Sigmoid
+ * Normalization: mean/std applied to all 48 dims (every input is a feature).
+ *
+ * History: an earlier variant included 5 previous-score feedback dims for a
+ * 53-dim input, but ablation showed identical F1 (0.961) without them and the
+ * train/inference mismatch they introduced is gone in this simpler model.
  */
 
 import { readFileSync } from 'node:fs'
 
-const INPUT_DIM = 53
-const FEAT_DIMS = 48 // INPUT_DIM - N_HISTORY (5 score dims excluded from normalization)
+const INPUT_DIM = 48
 
 /**
  * Load an MLP instance from a JSON weights file.
@@ -45,10 +44,9 @@ export class MLP {
    * @returns {number}  sigmoid score in [0, 1]
    */
   forward(input) {
-    // Normalize first FEAT_DIMS dims; score dims pass through unchanged
     const x = new Float32Array(INPUT_DIM)
     for (let i = 0; i < INPUT_DIM; i++) {
-      x[i] = i < FEAT_DIMS ? (input[i] - this._mean[i]) / (this._std[i] || 1e-6) : input[i]
+      x[i] = (input[i] - this._mean[i]) / (this._std[i] || 1e-6)
     }
 
     const h1 = _matVec(this._fc1w, x, this._fc1b)

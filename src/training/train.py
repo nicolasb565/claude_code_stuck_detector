@@ -38,18 +38,20 @@ STEP_FEATURES = [
 
 NUM_FEATURES = len(STEP_FEATURES)  # 8
 INPUT_DIM = NUM_FEATURES * (1 + N_HISTORY) + N_HISTORY  # 53
+INPUT_DIM_NO_SCORES = NUM_FEATURES * (1 + N_HISTORY)  # 48
 
 
 class StuckDetectorV5(nn.Module):
     """Per-step MLP with N-step history ring buffer.
 
-    Input: [current_features(8), prev×5_features(40), prev×5_scores(5)] = 53 floats
-    Architecture: Linear(53,64) → ReLU → Linear(64,32) → ReLU → Linear(32,1)
+    Input: [current_features(8), prev×5_features(40), prev×5_scores(5)] = 53 floats (default)
+           Or 48 floats when score history is disabled (no train/inference mismatch).
+    Architecture: Linear(input_dim,64) → ReLU → Linear(64,32) → ReLU → Linear(32,1)
     """
 
-    def __init__(self):
+    def __init__(self, input_dim: int = INPUT_DIM):
         super().__init__()
-        self.fc1 = nn.Linear(INPUT_DIM, 64)
+        self.fc1 = nn.Linear(input_dim, 64)
         self.fc2 = nn.Linear(64, 32)
         self.fc3 = nn.Linear(32, 1)
 
@@ -73,18 +75,22 @@ class StepDataset(Dataset):
 
 def build_sequences(
     rows_by_session: dict[str, list[dict]],
+    use_score_history: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Build (input_53, label) pairs for all steps with ring-buffer history.
+    """Build (input, label) pairs for all steps with ring-buffer history.
 
     For each step T the input is:
       [features_T, features_T-1, ..., features_T-5, score_T-1, ..., score_T-5]
 
     History positions are zero-padded at the start of each session.
     Previous scores use the soft label (0.0/0.5/1.0) as a proxy for the model's
-    own ring-buffer score at inference time.
+    own ring-buffer score at inference time. This creates a train/inference
+    mismatch (training sees perfect labels, inference sees the model's own
+    sigmoid output) — set use_score_history=False to drop those 5 dims entirely
+    and produce a 48-dim input that is identical at train and inference time.
 
     Returns:
-        inputs: float32 array of shape (n_steps, INPUT_DIM)
+        inputs: float32 array of shape (n_steps, INPUT_DIM or INPUT_DIM_NO_SCORES)
         labels: float32 array of shape (n_steps,)
         session_ids: list of session_id strings, one per step
     """
@@ -101,8 +107,12 @@ def build_sequences(
         for row in rows:
             curr = np.array([float(row[f]) for f in STEP_FEATURES], dtype=np.float32)
 
-            # [current(8), prev_T-1(8), ..., prev_T-5(8), score_T-1, ..., score_T-5]
-            inp = np.concatenate([curr, feat_buf.flatten(), score_buf])
+            if use_score_history:
+                # [current(8), prev_T-1(8), ..., prev_T-5(8), score_T-1, ..., score_T-5]
+                inp = np.concatenate([curr, feat_buf.flatten(), score_buf])
+            else:
+                # [current(8), prev_T-1(8), ..., prev_T-5(8)] — 48 dims, no scores
+                inp = np.concatenate([curr, feat_buf.flatten()])
             all_inputs.append(inp)
             all_labels.append(float(row["label"]))
             all_session_ids.append(sid)
@@ -110,8 +120,9 @@ def build_sequences(
             # Shift ring buffer: roll down, overwrite position 0 with most recent
             feat_buf = np.roll(feat_buf, 1, axis=0)
             feat_buf[0] = curr
-            score_buf = np.roll(score_buf, 1)
-            score_buf[0] = float(row["label"])
+            if use_score_history:
+                score_buf = np.roll(score_buf, 1)
+                score_buf[0] = float(row["label"])
 
     return (
         np.array(all_inputs, dtype=np.float32),
@@ -190,10 +201,18 @@ def metrics_at(
 
 def train(  # pylint: disable=too-many-statements,too-many-locals,too-many-branches
     manifest_path: str = "training_manifest.json",
+    use_score_history: bool = True,
+    output_dir: str = MODEL_DIR,
 ) -> None:
     random.seed(SEED)
     np.random.seed(SEED)
     torch.manual_seed(SEED)
+
+    input_dim = INPUT_DIM if use_score_history else INPUT_DIM_NO_SCORES
+    print(
+        f"\nVariant: {'with score history (53-dim)' if use_score_history else 'NO score history (48-dim)'}"
+    )
+    print(f"Output directory: {output_dir}")
 
     manifest = load_manifest(manifest_path)
     datasets_cfg = (
@@ -219,20 +238,25 @@ def train(  # pylint: disable=too-many-statements,too-many-locals,too-many-branc
 
     train_by_session, test_by_session = session_split(all_rows)
 
-    train_inputs, train_labels, _ = build_sequences(train_by_session)
-    test_inputs, test_labels, _ = build_sequences(test_by_session)
+    train_inputs, train_labels, _ = build_sequences(
+        train_by_session, use_score_history=use_score_history
+    )
+    test_inputs, test_labels, _ = build_sequences(
+        test_by_session, use_score_history=use_score_history
+    )
 
     # Shuffle training sequences (across sessions — ring buffer already baked in)
     perm = np.random.permutation(len(train_inputs))
     train_inputs = train_inputs[perm]
     train_labels = train_labels[perm]
 
-    # Normalize feature dims only — score dims (last N_HISTORY positions) are left
-    # in [0, 1] so inference values (continuous sigmoid outputs) are not shifted
-    # by training-set stats derived from trimodal {0, 0.5, 1} labels.
-    feat_dims = INPUT_DIM - N_HISTORY
-    mean = np.zeros(INPUT_DIM, dtype=np.float32)
-    std = np.ones(INPUT_DIM, dtype=np.float32)
+    # Normalize feature dims only. When score history is enabled the last
+    # N_HISTORY positions are left in [0, 1] so inference values (continuous
+    # sigmoid outputs) are not shifted by training-set stats derived from
+    # trimodal {0, 0.5, 1} labels. When disabled, every dim is a feature.
+    feat_dims = input_dim - N_HISTORY if use_score_history else input_dim
+    mean = np.zeros(input_dim, dtype=np.float32)
+    std = np.ones(input_dim, dtype=np.float32)
     mean[:feat_dims] = train_inputs[:, :feat_dims].mean(axis=0)
     std[:feat_dims] = train_inputs[:, :feat_dims].std(axis=0).clip(min=1e-6)
     train_inputs = (train_inputs - mean) / std
@@ -251,9 +275,9 @@ def train(  # pylint: disable=too-many-statements,too-many-locals,too-many-branc
     train_loader = DataLoader(train_ds, batch_size=512, shuffle=True)
     test_loader = DataLoader(test_ds, batch_size=1024)
 
-    model = StuckDetectorV5()
+    model = StuckDetectorV5(input_dim=input_dim)
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"\nModel: {total_params} params")
+    print(f"\nModel: {total_params} params (input_dim={input_dim})")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -337,8 +361,9 @@ def train(  # pylint: disable=too-many-statements,too-many-locals,too-many-branc
     print("\n=== Threshold sweep ===")
     print(f"  {'t':>5}  {'P':>6}  {'R':>6}  {'F1':>6}  {'FP':>6}  {'FN':>6}")
     for t in [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99]:
-        p, r, f, _, fp, fn, _ = metrics_at(scores, binary_labels, t)
-        print(f"  {t:>5.2f}  {p:>6.3f}  {r:>6.3f}  {f:>6.3f}  {fp:>6}  {fn:>6}")
+        # Use distinct names to avoid clobbering tp/fp/fn/tn used in final_metrics
+        p_t, r_t, f_t, _, fp_t, fn_t, _ = metrics_at(scores, binary_labels, t)
+        print(f"  {t:>5.2f}  {p_t:>6.3f}  {r_t:>6.3f}  {f_t:>6.3f}  {fp_t:>6}  {fn_t:>6}")
 
     final_metrics = {
         "precision": float(prec),
@@ -351,7 +376,7 @@ def train(  # pylint: disable=too-many-statements,too-many-locals,too-many-branc
         "threshold": threshold,
     }
 
-    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     torch.save(
         {
@@ -362,7 +387,7 @@ def train(  # pylint: disable=too-many-statements,too-many-locals,too-many-branc
             "metrics": final_metrics,
             "total_params": total_params,
         },
-        os.path.join(MODEL_DIR, "stuck_checkpoint.pt"),
+        os.path.join(output_dir, "stuck_checkpoint.pt"),
     )
 
     weights = {}
@@ -370,7 +395,7 @@ def train(  # pylint: disable=too-many-statements,too-many-locals,too-many-branc
         weights[name] = param.detach().cpu().numpy().tolist()
     weights["norm_mean"] = mean.tolist()
     weights["norm_std"] = std.tolist()
-    with open(os.path.join(MODEL_DIR, "stuck_weights.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(output_dir, "stuck_weights.json"), "w", encoding="utf-8") as f:
         json.dump(weights, f)
 
     config = {
@@ -378,19 +403,20 @@ def train(  # pylint: disable=too-many-statements,too-many-locals,too-many-branc
         "model_stage": 5,
         "n_history": N_HISTORY,
         "num_features": NUM_FEATURES,
-        "input_dim": INPUT_DIM,
+        "input_dim": input_dim,
+        "use_score_history": use_score_history,
         "total_params": total_params,
         "metrics": final_metrics,
         "step_features": STEP_FEATURES,
     }
-    with open(os.path.join(MODEL_DIR, "stuck_config.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(output_dir, "stuck_config.json"), "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
 
-    size = os.path.getsize(os.path.join(MODEL_DIR, "stuck_weights.json"))
+    size = os.path.getsize(os.path.join(output_dir, "stuck_weights.json"))
     print("\nSaved:")
-    print(f"  {MODEL_DIR}/stuck_checkpoint.pt")
-    print(f"  {MODEL_DIR}/stuck_weights.json ({size / 1024:.1f} KB)")
-    print(f"  {MODEL_DIR}/stuck_config.json")
+    print(f"  {output_dir}/stuck_checkpoint.pt")
+    print(f"  {output_dir}/stuck_weights.json ({size / 1024:.1f} KB)")
+    print(f"  {output_dir}/stuck_config.json")
 
 
 if __name__ == "__main__":
@@ -398,5 +424,27 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", default="training_manifest.json")
+    parser.add_argument(
+        "--no-score-history",
+        action="store_true",
+        help="Drop the 5 score history dims (input becomes 48-dim, no train/inference mismatch)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Where to write checkpoint/weights/config (default: proxy/, "
+        "or proxy/experiments/no_score_history/ when --no-score-history is set)",
+    )
     _args = parser.parse_args()
-    train(_args.manifest)
+    out = _args.output_dir
+    if out is None:
+        out = (
+            os.path.join(MODEL_DIR, "experiments", "no_score_history")
+            if _args.no_score_history
+            else MODEL_DIR
+        )
+    train(
+        _args.manifest,
+        use_score_history=not _args.no_score_history,
+        output_dir=out,
+    )
