@@ -112,13 +112,13 @@ The median STUCK step scores 0.999; 95% of productive steps score below 0.264. T
 
 **Improvement over v4 (windowed CNN):**
 
-| Model | Architecture | Params | Input dim | F1 | Recall |
-|---|---|---|---|---|---|
-| v4 CNN | Conv1d, 10-step windows | 2,605 | — | 0.908 | 0.859 |
-| v5 MLP (53-dim) | Per-step + ring + score feedback | 5,569 | 53 | 0.961 (inflated) | 0.951 |
-| **v5 MLP (current)** | **Per-step + ring buffer** | **5,249** | **48** | **0.961** | **0.949** |
+| Model | Architecture | Params | Input dim | F1 | Precision | Recall |
+|---|---|---|---|---|---|---|
+| v4 CNN | Conv1d, 10-step windows | 2,605 | — | 0.908 | — | 0.859 |
+| v5 MLP (53-dim) | Per-step + ring + score feedback | 5,569 | 53 | 0.9614 | 0.9722 | 0.9508 |
+| **v5 MLP (current)** | **Per-step + ring buffer** | **5,249** | **48** | **0.9610** | **0.9737** | **0.9486** |
 
-The 53-dim variant's F1 was inflated by teacher forcing (training filled the score buffer with perfect ground-truth labels, so test eval saw the same — not what the proxy actually does at inference). The 48-dim variant matches that F1 honestly: eval = inference by construction since there's no feedback loop.
+The 53-dim variant scored very slightly higher on F1 and recall (within training noise), but its eval used teacher forcing for the score history dims — training filled them with perfect ground-truth labels, and so did test eval. The proxy can't do that at inference (no labels available); it would have to feed its own sigmoid output back, which is out of the training distribution. The 48-dim variant has eval = inference by construction since there's no feedback loop, so its F1 is the honest production number. We picked it for that reason plus the smaller param count.
 
 ## Data Pipeline
 
@@ -215,7 +215,7 @@ The ring buffer provides the repetition signal directly: if `cmd_hash` at T equa
 
 2. **Stuck loop analysis.** 65% of observed stuck runs are single-step (the agent repeats one command). N=5 history covers 85.4% of multi-step stuck loops, making it the optimal depth without adding noisy padding for rare deep loops.
 
-3. **Score feedback was dead weight.** An earlier 53-dim variant fed the model's own previous 5 scores back as input. Training filled those slots with ground-truth labels (teacher forcing); inference filled them with continuous sigmoid output — a distribution mismatch the model never saw during training. Ablation showed F1=0.961 with or without those 5 dims, so they were dropped. The model relies entirely on per-step features (especially `output_similarity`) for the repetition signal.
+3. **Score feedback was a wash, but unsafe.** An earlier 53-dim variant fed the model's own previous 5 scores back as input. Training filled those slots with ground-truth labels (teacher forcing); inference would fill them with continuous sigmoid output — values the model never saw during training. The 53-dim variant scored 0.9614 F1 in eval (very slightly higher than the 48-dim's 0.9610), but that eval also used teacher forcing, so it overstates real-world inference performance. Dropping the score history removes the train/inference mismatch entirely and matches eval to inference by construction. The model relies entirely on per-step features (especially `output_similarity`) for the repetition signal.
 
 4. **CRC32 identity is learnable.** Hash values aren't meaningful as magnitudes, but when the same command appears in consecutive history slots, the MLP sees near-zero differences between those positions — a learnable equality signal without explicit equality features.
 
