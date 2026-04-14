@@ -482,3 +482,124 @@ suggestion:
 Or just squash the whole branch as "Phase 1 + Phase 2 OOD
 generalization" and merge to main.
 
+---
+
+## Most important finding: the nudge controller is gating away v6's improvement
+
+After training v6_pw3 and getting +15 TPs in raw classifier eval, I ran
+the **simulator** on all 10 transcripts to see what would actually fire
+under the live nudge controller (silent absorb at level -1 + cooldowns
+[1, 4, 8, 8] + reset-on-drop). Only 2 nudges fire across the entire
+10-task benchmark, even with v6_pw3.
+
+The reason: most v6_pw3 stuck signals come in short bursts (3-5 turns)
+followed by a score drop, which resets the nudge level back to -1, so
+the next burst gets silent-absorbed without firing. Even though the
+classifier is now correctly identifying many more stuck patterns, the
+state machine is too conservative to fire on them.
+
+**Tighter cooldowns + smaller silent buffer fix this dramatically:**
+
+```
+config                  total  llvm  33_geo  others (sqlite/django/react/express/beast/lapack)
+v5 baseline               0     0     0      0
+v6_pw3 default cd         2     1     1      0
+v6_pw3 cd=0,2,4,4         6     2     4      0   ← winner
+v6_pw3 strat-B sb=3       6     2     4      0   ← also winner (different level mix)
+```
+
+**The headline:** with v6_pw3 + cd=[0,2,4,4]:
+- **6 nudges fire across the 10-task benchmark** (vs 0 on v5 baseline)
+- **All 6 fires are on stuck-prone tasks** (LLVM and 33_geometry)
+- **Zero false positives** on the 6 productive control tasks (sqlite,
+  django, react, express, beast, lapack)
+- LLVM gets 2 soft nudges, 33_geometry gets 3 soft + 1 medium
+
+This is the first time the proxy meaningfully fires on the OOD
+benchmark without poisoning any productive run.
+
+**Strategy B (skip soft, fire medium/hard) on v6_pw3** has the same fire
+count but with more aggressive levels: 2 medium nudges on LLVM, 3 medium
++ 1 hard on 33_geometry. Pick this if you want louder corrective
+messages.
+
+## The actually-recommended deployment
+
+The simplest end-to-end recipe that translates into measurable benchmark
+movement:
+
+1. Use **v6_pw3 weights** (`proxy/experiments/v6_phase2_pw3/`) as the
+   classifier.
+2. Use **cooldowns [0, 2, 4, 4]** instead of the current [1, 4, 8, 8].
+   This means: silent absorb is 0 turns (next stuck signal fires
+   immediately), level-0 cooldown 2 turns, level-1 cooldown 4 turns,
+   level-2 cooldown 4 turns. Aggressive firing, but the precision
+   stays high because v6's features are accurate enough.
+3. Keep the existing reset-on-drop logic at `0.94 × threshold`.
+4. Run the full off+on benchmark to confirm: do these 6 nudges
+   actually help on LLVM and 33_geometry? Or do they hurt by
+   interrupting reasoning? **That's the question only a real on-run
+   can answer**, and now we have a config that's worth spending the
+   API budget to test.
+
+The previous tuning loop was "tweak nudge strategy on v5 features
+that don't fire" → no signal to optimize against. Now we have a
+classifier that fires on the right things; the next iteration is to
+measure whether firing helps the agent. That's a phase-3 experiment.
+
+## Reproducing the trained checkpoints
+
+`proxy/experiments/` is in `.gitignore` (the convention in this repo
+is that experiments are reproducible from `train.py` flags). To
+regenerate the checkpoints used in this writeup:
+
+```bash
+# Schema 4 multi-slot
+.venv/bin/python generate.py --skip-labeling
+.venv/bin/python src/training/train.py \
+  --manifest training_manifest_v4.json \
+  --no-score-history --exclude-feature step_index_norm \
+  --output-dir proxy/experiments/v5_1_multi_slot
+
+# Schema 5 phase 2 (default pos_weight)
+.venv/bin/python generate.py --skip-labeling
+.venv/bin/python src/training/train.py \
+  --manifest training_manifest_v5.json \
+  --no-score-history --exclude-feature step_index_norm \
+  --output-dir proxy/experiments/v6_phase2
+
+# Schema 5 phase 2 with pos_weight reweighting
+POS_WEIGHT_MULT=3 .venv/bin/python src/training/train.py \
+  --manifest training_manifest_v5.json \
+  --no-score-history --exclude-feature step_index_norm \
+  --output-dir proxy/experiments/v6_phase2_pw3
+# (and pw5, pw10 for the other variants)
+```
+
+`generate.py --skip-labeling` re-extracts features without invoking
+the labeling API. **Always use `--skip-labeling`** unless you intend
+to spend Sonnet labeling tokens on new sessions.
+
+## Updated TL;DR (Phase 1 + Phase 2 combined)
+
+- Phase 1 (multi-slot output history) committed: schema 3 → 4, marginal
+  AUC win on the LLVM Sonnet disagreement set (+0.012 LR AUC),
+  MLP-compatible.
+- Phase 2 (3 new feature dimensions: file_repeat_count_norm,
+  cmd_hash_coarse, recent_token_jaccard) committed: schema 4 → 5,
+  retrained MLPs in proxy/experiments/.
+- Best trained model on the OOD benchmark: **v6_pw3** — pos_weight × 3,
+  schema 5 features. Pooled AUC 0.5514 → 0.6309, F1 0.074 → 0.205,
+  TP 4 → 15, on 03_llvm_loop_vec specifically: 1 → 7 stuck steps caught.
+- The vanilla v6_phase2 underperforms v6_pw3 because the training
+  corpora (nlile/dataclaw/masterclass/claudeset) lack LLVM-style stuck
+  patterns; pos_weight reweighting biases the loss to value the rare
+  positives. Real fix is more diverse training data.
+- **The biggest practical win is pairing v6_pw3 with shorter
+  cooldowns**: with `cd=[0,2,4,4]` the proxy fires 6 meaningful nudges
+  on the 10-task benchmark (vs 0 with v5 baseline), all on stuck-prone
+  tasks, zero false positives on productive controls.
+- All work pushed to `try-to-fix-ood-dataset`. Tests: 252/252 passing.
+  Trained checkpoints not committed (gitignored) but reproducible from
+  the documented commands.
+
