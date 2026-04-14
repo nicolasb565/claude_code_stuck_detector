@@ -195,6 +195,38 @@ describe('computeFeatures', () => {
     assert.equal(feats2[3], 0.0)
   })
 
+  test('multi-slot: matches an older predecessor, not just the most recent', () => {
+    // Pattern: call A (output X), call A (output Y), call A (output X again).
+    // Single-slot would compare the 3rd call to Y (low similarity). Multi-slot
+    // should find the match against the earlier X and report 1.0.
+    const history = new Map()
+    computeFeatures({ tool: 'bash', cmd: 'ls', file: null, output: 'alpha\nbeta' }, history)
+    computeFeatures({ tool: 'bash', cmd: 'ls', file: null, output: 'gamma\ndelta' }, history)
+    const feats3 = computeFeatures(
+      { tool: 'bash', cmd: 'ls', file: null, output: 'alpha\nbeta' },
+      history,
+    )
+    assert.equal(feats3[3], 1.0)
+    assert.equal(feats3[4], 1.0)
+  })
+
+  test('multi-slot: FIFO eviction after N+1 entries', () => {
+    // Push 6 distinct outputs (K=5 slots), the oldest should be evicted.
+    // The 7th call with content matching the oldest should then score 0.
+    const history = new Map()
+    const outputs = ['a', 'b', 'c', 'd', 'e', 'f']
+    for (const o of outputs) {
+      computeFeatures({ tool: 'bash', cmd: 'x', file: null, output: o }, history)
+    }
+    // Slots now hold b, c, d, e, f (a was evicted). Call with 'a' should
+    // score zero because the 'a' slot is gone.
+    const feats = computeFeatures({ tool: 'bash', cmd: 'x', file: null, output: 'a' }, history)
+    assert.equal(feats[3], 0.0)
+    // Call with 'f' (still in slots) should match.
+    const feats2 = computeFeatures({ tool: 'bash', cmd: 'x', file: null, output: 'f' }, history)
+    assert.equal(feats2[3], 1.0)
+  })
+
   test('edit tool has output_similarity=0 and has_prior=0 even after repeat', () => {
     const history = new Map()
     computeFeatures({ tool: 'edit', cmd: 'foo.py', file: 'foo.py', output: 'ok' }, history)

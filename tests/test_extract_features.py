@@ -179,3 +179,50 @@ class TestExtractSession:
 
         assert data1["steps"] == data2["steps"]
         assert data1["n_steps"] == data2["n_steps"]
+
+
+class TestMultiSlotOutputHistory:
+    """Schema 4: output_history keeps last K=5 predecessors and reports
+    max Jaccard. This catches long-range repetition patterns that the
+    single-slot schema 3 silently dropped."""
+
+    def _run(self, *bash_outputs):
+        steps = [
+            {"tool": "bash", "cmd": "ls", "file": None, "output": o, "thinking": ""}
+            for o in bash_outputs
+        ]
+        return compute_step_features(steps)
+
+    def test_matches_older_predecessor_not_just_most_recent(self):
+        # Pattern: A(X), A(Y), A(X again). Schema 3 compared step 3 to step 2
+        # only → similarity 0. Schema 4 finds the earlier X match → similarity 1.
+        feats = self._run("alpha\nbeta", "gamma\ndelta", "alpha\nbeta")
+        assert feats[2]["output_similarity"] == 1.0
+        assert feats[2]["has_prior_output"] == 1.0
+
+    def test_max_over_all_priors(self):
+        feats = self._run("aaa", "bbb", "ccc", "aaa")
+        assert feats[3]["output_similarity"] == 1.0
+
+    def test_fifo_eviction_after_k_plus_one(self):
+        # After pushing 6 distinct outputs with K=5 slots, the oldest is
+        # evicted. A 7th call matching the oldest should score 0.
+        feats = self._run("a", "b", "c", "d", "e", "f", "a")
+        assert feats[6]["output_similarity"] == 0.0
+        # But matching the most recent (f) still works.
+        feats2 = self._run("a", "b", "c", "d", "e", "f", "f")
+        assert feats2[6]["output_similarity"] == 1.0
+
+    def test_has_prior_unaffected_by_multi_slot_for_first_call(self):
+        feats = self._run("anything")
+        assert feats[0]["has_prior_output"] == 0.0
+        assert feats[0]["output_similarity"] == 0.0
+
+    def test_partial_overlap_with_older_slot(self):
+        # Step 3 shares half its lines with step 1 (evicted? no — K=5, not
+        # evicted) and nothing with step 2. Max Jaccard should catch step 1.
+        feats = self._run("x\ny", "z\nw", "x\nq")
+        # step 3 vs step 1: {x,y} ∩ {x,q} = {x}; union = {x,y,q} → 1/3
+        # step 3 vs step 2: {z,w} ∩ {x,q} = {} → 0
+        # max = 1/3
+        assert abs(feats[2]["output_similarity"] - 1.0 / 3.0) < 1e-9

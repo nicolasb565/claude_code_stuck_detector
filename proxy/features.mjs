@@ -135,6 +135,22 @@ export function normalizeToSet(output) {
 }
 
 /**
+ * Maximum prior output slots kept per cmd_hash in outputHistory.
+ * The previous implementation stored a single Set per key and overwrote it
+ * on every call, so only the most recent predecessor was visible to the
+ * Jaccard comparison. Multi-slot keeps the last K predecessors and takes
+ * the MAX similarity against any of them — catches "agent re-reads the
+ * same file across many turns" patterns that were previously invisible.
+ *
+ * Empirical effect on the 10-task benchmark: +0.012 pooled LR-AUC vs
+ * Sonnet ground-truth labels, with no regression on any single task (see
+ * benchmarks/FEATURE_FIX_NOTES.md). On 03_llvm_loop_vec specifically,
+ * lifts output_similarity on 12 Sonnet-STUCK steps that previously read
+ * zero.
+ */
+const OUTPUT_HISTORY_SLOTS = 5
+
+/**
  * Jaccard similarity between two output sets.
  *
  * @param {Set} setA
@@ -151,13 +167,32 @@ export function jaccard(setA, setB) {
 }
 
 /**
- * Compute the 8 v5 per-step features for one tool call.
+ * Max Jaccard similarity of setA against any Set in the prior slots list.
  *
- * Side effect: mutates outputHistory by storing the current step's outputSet
- * keyed by cmdHashInt so subsequent steps can compute output_similarity.
+ * @param {Set} setA
+ * @param {Set[]|undefined} priors  array of up to OUTPUT_HISTORY_SLOTS sets
+ * @returns {number}  value in [0, 1]
+ */
+export function maxJaccard(setA, priors) {
+  if (!priors || priors.length === 0) return 0.0
+  let best = 0
+  for (const p of priors) {
+    const j = jaccard(setA, p)
+    if (j > best) best = j
+    if (best >= 1.0) break
+  }
+  return best
+}
+
+/**
+ * Compute the 7 v5 per-step features for one tool call.
+ *
+ * Side effect: mutates outputHistory by appending the current step's
+ * outputSet to the slot list keyed by cmdHashInt. Slots are bounded to
+ * OUTPUT_HISTORY_SLOTS entries (FIFO eviction).
  *
  * @param {{ tool: string, cmd: string, file: string|null, output: string }} step
- * @param {Map<number, Set>} outputHistory  keyed by cmdHashInt, mutated in-place
+ * @param {Map<number, Set[]>} outputHistory  keyed by cmdHashInt, mutated in-place
  * @returns {Float32Array}  length-7 feature vector
  */
 export function computeFeatures(step, outputHistory) {
@@ -173,8 +208,9 @@ export function computeFeatures(step, outputHistory) {
   const isEditTool = EDIT_TOOLS.has(tool)
 
   const outputSet = isEditTool ? new Set() : normalizeToSet(cleanOutput)
-  const hasPrior = !isEditTool && outputHistory.has(cmdHashInt)
-  const outputSim = isEditTool ? 0.0 : jaccard(outputSet, outputHistory.get(cmdHashInt) ?? null)
+  const priors = cmdHashInt !== null ? outputHistory.get(cmdHashInt) : undefined
+  const hasPrior = !isEditTool && priors !== undefined && priors.length > 0
+  const outputSim = isEditTool ? 0.0 : maxJaccard(outputSet, priors)
 
   const features = new Float32Array(7)
   features[0] = toolIdx
@@ -186,7 +222,13 @@ export function computeFeatures(step, outputHistory) {
   features[6] = cleanOutput && ERROR_RE.test(cleanOutput.slice(0, 2000)) ? 1.0 : 0.0
 
   if (cmdHashInt !== null && !isEditTool) {
-    outputHistory.set(cmdHashInt, outputSet)
+    const slots = outputHistory.get(cmdHashInt)
+    if (slots === undefined) {
+      outputHistory.set(cmdHashInt, [outputSet])
+    } else {
+      slots.push(outputSet)
+      if (slots.length > OUTPUT_HISTORY_SLOTS) slots.shift()
+    }
   }
 
   return features

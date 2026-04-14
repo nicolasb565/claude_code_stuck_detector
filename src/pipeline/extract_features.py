@@ -12,7 +12,15 @@ import tempfile
 import zlib
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 3
+# Schema 4: multi-slot output history (K=5) with max-jaccard lookup.
+# Previous schema (3) stored a single Set per cmd_hash and overwrote it on
+# every call, so only the most recent predecessor was visible to the
+# similarity check. Multi-slot catches "agent re-reads the same file across
+# many turns" and similar long-range repetition patterns that schema 3
+# silently dropped. See benchmarks/FEATURE_FIX_NOTES.md for the measurement
+# on the LLVM Sonnet-labeled disagreement set.
+SCHEMA_VERSION = 4
+OUTPUT_HISTORY_SLOTS = 5
 
 STEP_FEATURES = [
     "tool_idx",
@@ -98,6 +106,22 @@ def _jaccard(current_set: frozenset, previous_set: frozenset | None) -> float:
     return len(current_set & previous_set) / len(union) if union else 1.0
 
 
+def _max_jaccard(current_set: frozenset, prior_sets: list | None) -> float:
+    """Max Jaccard against any prior Set in the slot list. Mirrors
+    maxJaccard() in proxy/features.mjs; both must agree exactly for
+    train/inference parity."""
+    if not prior_sets:
+        return 0.0
+    best = 0.0
+    for p in prior_sets:
+        j = _jaccard(current_set, p)
+        if j > best:
+            best = j
+        if best >= 1.0:
+            break
+    return best
+
+
 def _has_error_indicators(output: str) -> bool:
     if not output:
         return False
@@ -124,7 +148,10 @@ def compute_step_features(steps: list[dict]) -> list[dict]:
 
     total_steps = len(steps)
     result = []
-    output_history: dict = {}  # cmd_hash_int → output_set, for output_similarity
+    # cmd_hash_int → list of prior output sets, bounded to OUTPUT_HISTORY_SLOTS.
+    # FIFO eviction: oldest slot discarded when a new one arrives and the
+    # list is full.
+    output_history: dict[int, list] = {}
 
     for i, step in enumerate(steps):
         tool = step.get("tool", "other")
@@ -157,8 +184,9 @@ def compute_step_features(steps: list[dict]) -> list[dict]:
             output_sim = 0.0
         else:
             output_set = _normalize_to_set(output)
-            has_prior = output_history.get(cmd_hash_int) is not None
-            output_sim = _jaccard(output_set, output_history.get(cmd_hash_int))
+            priors = output_history.get(cmd_hash_int) if cmd_hash_int is not None else None
+            has_prior = bool(priors)
+            output_sim = _max_jaccard(output_set, priors)
 
         feat = {
             "tool_idx": TOOL_TO_IDX[tool],
@@ -173,7 +201,13 @@ def compute_step_features(steps: list[dict]) -> list[dict]:
         result.append(feat)
 
         if cmd_hash_int is not None and not is_edit_tool:
-            output_history[cmd_hash_int] = output_set
+            slots = output_history.get(cmd_hash_int)
+            if slots is None:
+                output_history[cmd_hash_int] = [output_set]
+            else:
+                slots.append(output_set)
+                if len(slots) > OUTPUT_HISTORY_SLOTS:
+                    slots.pop(0)
 
     return result
 
