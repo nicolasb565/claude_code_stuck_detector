@@ -10,17 +10,29 @@
  * train/inference distribution mismatch).
  */
 
-import { parseToolCall, computeFeatures } from './features.mjs'
+import { parseToolCall, computeFeatures, FeatureState } from './features.mjs'
 import { RingBuffer } from './ring_buffer.mjs'
 
 export class SessionDetector {
   /**
-   * @param {{ forward: (input: Float32Array) => number }} mlp  loaded MLP instance
+   * @param {{ forward: (input: Float32Array) => number, inputDim?: number }} mlp
+   *   loaded MLP instance. If mlp.inputDim is set, the ring buffer is sized
+   *   accordingly so v5 (42-dim) and v6 (60-dim) checkpoints can both be
+   *   served. Defaults to the v5 7-feature ring.
    */
   constructor(mlp) {
     this._mlp = mlp
-    this._ring = new RingBuffer()
-    this._outputHistory = new Map() // cmdHashInt → outputSet
+    // FeatureState carries everything per-session: outputHistory (multi-slot
+    // since schema 4), fileTouchCount + recentTokenSets (since schema 5).
+    // Backward-compat: if features.mjs is given a FeatureState, it returns
+    // 10-dim; if it gets a plain Map it returns 7-dim. We always use
+    // FeatureState here so v6 inference works; v5 weights still load
+    // because the ring buffer just reads the first 7 dims.
+    this._featureState = new FeatureState()
+    // RingBuffer signature: (n_history, featureDim). We use the default
+    // n=5 history depth and let featureDim follow the loaded MLP — 7 for
+    // v5 weights, 10 for v6/v6_pwN weights.
+    this._ring = new RingBuffer(undefined, mlp.featureDim ?? 7)
     this._stepCount = 0
   }
 
@@ -34,7 +46,9 @@ export class SessionDetector {
    */
   addStep(toolName, input, output) {
     const step = parseToolCall(toolName, input, output)
-    const features = computeFeatures(step, this._outputHistory)
+    // computeFeatures detects FeatureState and returns 10-dim. The ring
+    // buffer can still consume those features regardless of MLP width.
+    const features = computeFeatures(step, this._featureState)
     const inputVec = this._ring.buildInput(features)
     const score = this._mlp.forward(inputVec)
     this._ring.push(features)

@@ -226,3 +226,95 @@ class TestMultiSlotOutputHistory:
         # step 3 vs step 2: {z,w} ∩ {x,q} = {} → 0
         # max = 1/3
         assert abs(feats[2]["output_similarity"] - 1.0 / 3.0) < 1e-9
+
+
+class TestPhase2Features:
+    """Schema 5: file_repeat_count_norm, cmd_hash_coarse, recent_token_jaccard."""
+
+    def _run(self, steps_input):
+        steps = []
+        for s in steps_input:
+            steps.append({
+                "tool": s.get("tool", "bash"),
+                "tool_name": s.get("tool_name", "Bash"),
+                "cmd": s["cmd"],
+                "file": s.get("file"),
+                "output": s.get("output", ""),
+                "thinking": "",
+            })
+        return compute_step_features(steps)
+
+    def test_file_repeat_count_zero_on_first_touch(self):
+        feats = self._run([{"cmd": "cat /scratch/foo.cpp"}])
+        assert feats[0]["file_repeat_count_norm"] == 0.0
+
+    def test_file_repeat_count_grows_with_repeats(self):
+        # Touch the same file 4 times; counter should monotonically increase.
+        feats = self._run([
+            {"cmd": "cat /scratch/foo.cpp"},
+            {"cmd": "head -20 /scratch/foo.cpp"},
+            {"cmd": "grep bar /scratch/foo.cpp"},
+            {"cmd": "wc -l /scratch/foo.cpp"},
+        ])
+        scores = [f["file_repeat_count_norm"] for f in feats]
+        assert scores[0] == 0.0
+        assert 0 < scores[1] < scores[2] < scores[3]
+        # Still bounded
+        assert all(0 <= s <= 1 for s in scores)
+
+    def test_file_repeat_picks_up_native_tool_file_field(self):
+        feats = self._run([
+            {"tool": "view", "tool_name": "Read",
+             "cmd": "/scratch/foo.cpp", "file": "/scratch/foo.cpp"},
+            {"tool": "bash", "tool_name": "Bash",
+             "cmd": "grep bar /scratch/foo.cpp"},
+        ])
+        # Read step touched foo.cpp (via file field). Bash step's regex
+        # extracted /scratch/foo.cpp from the command. Should detect repeat.
+        assert feats[1]["file_repeat_count_norm"] > 0
+
+    def test_cmd_hash_coarse_collapses_git_subcommands(self):
+        # git log and git diff have different fine cmd_hashes but should
+        # share cmd_hash_coarse (both → just "git").
+        feats = self._run([
+            {"cmd": "git log --oneline"},
+            {"cmd": "git diff HEAD~1"},
+        ])
+        # cmd_hash_coarse for both should equal CRC32-norm("git")
+        assert feats[0]["cmd_hash_coarse"] == feats[1]["cmd_hash_coarse"]
+        # But the regular cmd_hash is computed from the (over-aggressive)
+        # _cmd_semantic_key, which itself collapses git subcommands. So they
+        # also match here. The feature distinction matters for cases where
+        # _cmd_semantic_key happens to differentiate (e.g. with file targets).
+        feats2 = self._run([
+            {"cmd": "git log llvm/lib/Transforms/Vectorize/VPlan.cpp"},
+            {"cmd": "git diff HEAD~1 llvm/lib/Transforms/Vectorize/VPlan.cpp"},
+        ])
+        # Coarse still equal (just "git")
+        assert feats2[0]["cmd_hash_coarse"] == feats2[1]["cmd_hash_coarse"]
+
+    def test_recent_token_jaccard_zero_on_first_command(self):
+        feats = self._run([{"cmd": "grep foo bar.txt"}])
+        assert feats[0]["recent_token_jaccard"] == 0.0
+
+    def test_recent_token_jaccard_high_for_similar_commands(self):
+        # Two greps for the same symbol in similar paths should share
+        # tokens like grep, getSCEVExprForVPValue, scratch, llvm.
+        feats = self._run([
+            {"cmd": "grep -rn getSCEVExprForVPValue /scratch/llvm/lib/Transforms/Vectorize"},
+            {"cmd": "grep -B5 getSCEVExprForVPValue /scratch/llvm/lib/Transforms/Vectorize/VPlan.cpp"},
+        ])
+        assert feats[1]["recent_token_jaccard"] > 0.3
+
+    def test_recent_token_jaccard_low_for_unrelated_commands(self):
+        feats = self._run([
+            {"cmd": "git log --oneline"},
+            {"cmd": "ninja -C build opt"},
+        ])
+        assert feats[1]["recent_token_jaccard"] < 0.2
+
+    def test_phase2_features_present_in_schema(self):
+        feats = self._run([{"cmd": "ls"}])
+        assert "file_repeat_count_norm" in feats[0]
+        assert "cmd_hash_coarse" in feats[0]
+        assert "recent_token_jaccard" in feats[0]

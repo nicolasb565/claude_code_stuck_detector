@@ -12,15 +12,31 @@ import tempfile
 import zlib
 from datetime import datetime, timezone
 
-# Schema 4: multi-slot output history (K=5) with max-jaccard lookup.
-# Previous schema (3) stored a single Set per cmd_hash and overwrote it on
-# every call, so only the most recent predecessor was visible to the
-# similarity check. Multi-slot catches "agent re-reads the same file across
-# many turns" and similar long-range repetition patterns that schema 3
-# silently dropped. See benchmarks/FEATURE_FIX_NOTES.md for the measurement
-# on the LLVM Sonnet-labeled disagreement set.
-SCHEMA_VERSION = 4
+# Schema 5: Phase 2 — adds 3 new feature dimensions on top of Schema 4's
+# multi-slot output history. The new features address LLVM-style stuck
+# patterns where the agent uses different commands to circle the same
+# code area, which the original 7-feature set could not detect.
+#
+#   file_repeat_count_norm — count of prior steps touching any of the
+#     file paths the current step references (extracted from cmd via
+#     regex). Catches "agent reads VPlanTransforms.cpp 6 times across
+#     different tools." Log1p-normalized so it stays in [0, 1].
+#   cmd_hash_coarse — hash of the program name only (e.g. just "git",
+#     just "grep"). Provides a SECOND has_prior_output binding at coarse
+#     granularity, so the model gets independent signals for "this exact
+#     command repeats" and "this command family repeats."
+#   recent_token_jaccard — max Jaccard of the current command's token
+#     set against the last K commands' token sets. Catches "semantically
+#     related but technically different" exploration loops without any
+#     hash binding at all.
+#
+# All three were validated in benchmarks/feature_experiments.py against
+# Sonnet-labeled ground truth on the 10-task off-run: pooled LR AUC went
+# from 0.7708 (schema 3 baseline) → 0.7826 (schema 4 multi-slot) →
+# 0.8308 (schema 5 phase 2). Dominant new weight is file_repeat_count_norm.
+SCHEMA_VERSION = 5
 OUTPUT_HISTORY_SLOTS = 5
+RECENT_TOKEN_HISTORY = 5
 
 STEP_FEATURES = [
     "tool_idx",
@@ -31,6 +47,10 @@ STEP_FEATURES = [
     "output_length",
     "is_error",
     "step_index_norm",
+    # Phase 2:
+    "file_repeat_count_norm",
+    "cmd_hash_coarse",
+    "recent_token_jaccard",
 ]
 
 _CRC32_NORM = 1.0 / (1 << 32)  # map uint32 → [0, 1)
@@ -47,6 +67,15 @@ _FILE_EXT_RE = re.compile(r"\.[a-zA-Z]{1,5}$")
 _SYSTEM_REMINDER_RE = re.compile(
     r"<system-reminder>.*?</system-reminder>", re.DOTALL | re.I
 )
+
+# Phase 2 helpers
+# Path-extraction regex: things in a command that look like file paths.
+# Matches /abs/path/to/file.ext, ./relative/path, plain file.ext, dir/file.
+_PATH_TOKEN_RE = re.compile(
+    r"(?:/?[\w@.\-]+/)+[\w@.\-]+(?:\.[a-zA-Z0-9_]{1,8})?|[\w@.\-]+\.[a-zA-Z0-9_]{1,8}"
+)
+# Token splitter for recent_token_jaccard: word-like chunks of ≥2 chars.
+_TOKEN_SPLIT_RE = re.compile(r"[A-Za-z_][\w./\-]+|\b\d+\b")
 
 ERROR_PATTERNS = re.compile(
     r"(error|traceback|exception|failed|failure|fatal|cannot|unable to|not found|permission denied"
@@ -134,6 +163,43 @@ def _strip_system_reminders(output: str) -> str:
     return _SYSTEM_REMINDER_RE.sub("", output)
 
 
+def _extract_path_tokens(cmd: str) -> set[str]:
+    """Pull file/path-like tokens out of a free-form command string."""
+    if not cmd:
+        return set()
+    out = set()
+    for m in _PATH_TOKEN_RE.finditer(cmd):
+        tok = m.group(0).strip()
+        if len(tok) < 2 or tok.isdigit():
+            continue
+        out.add(tok)
+    return out
+
+
+def _command_token_set(cmd: str) -> frozenset:
+    """Token set for recent_token_jaccard. Strips flags and short tokens."""
+    if not cmd:
+        return frozenset()
+    tokens = _TOKEN_SPLIT_RE.findall(cmd)
+    return frozenset(t.lower() for t in tokens if not t.startswith("-") and len(t) >= 2)
+
+
+def _coarse_program(cmd: str) -> str:
+    """Just the program name from a bash command. 'git', 'grep', 'ninja', etc."""
+    if not cmd:
+        return ""
+    parts = re.split(r"\s*(?:&&|;)\s*", cmd.strip())
+    real = [p for p in parts if p.strip() and not _SILENT_CMD_RE.match(p.strip())]
+    if not real:
+        tokens = cmd.strip().split()
+        return tokens[0].rsplit("/", 1)[-1] if tokens else ""
+    first = re.split(r"\s*\|\s*", real[0].strip())[0]
+    tokens = first.strip().split()
+    if not tokens:
+        return ""
+    return tokens[0].rsplit("/", 1)[-1]
+
+
 def compute_step_features(steps: list[dict]) -> list[dict]:
     """Compute per-step features from normalized step dicts.
 
@@ -149,9 +215,15 @@ def compute_step_features(steps: list[dict]) -> list[dict]:
     total_steps = len(steps)
     result = []
     # cmd_hash_int → list of prior output sets, bounded to OUTPUT_HISTORY_SLOTS.
-    # FIFO eviction: oldest slot discarded when a new one arrives and the
-    # list is full.
     output_history: dict[int, list] = {}
+    # Phase 2 state
+    file_touch_count: dict[str, int] = {}  # path → count of prior steps touching it
+    recent_token_sets: list[frozenset] = []  # last RECENT_TOKEN_HISTORY token sets
+
+    # Normalization constant for file_repeat_count_norm: log1p(50) ≈ 3.93.
+    # Picked empirically — a step touching files seen 50 prior times is
+    # close to the maximum we expect even on long sessions.
+    _FILE_REPEAT_NORM = math.log1p(50)
 
     for i, step in enumerate(steps):
         tool = step.get("tool", "other")
@@ -188,6 +260,38 @@ def compute_step_features(steps: list[dict]) -> list[dict]:
             has_prior = bool(priors)
             output_sim = _max_jaccard(output_set, priors)
 
+        # ── Phase 2 features ─────────────────────────────────────────────────
+        cur_paths = _extract_path_tokens(cmd)
+        if file_path:
+            cur_paths.add(file_path)
+        if cur_paths:
+            repeat_sum = sum(file_touch_count.get(p, 0) for p in cur_paths)
+            file_repeat_count_norm = min(1.0, math.log1p(repeat_sum) / _FILE_REPEAT_NORM)
+        else:
+            file_repeat_count_norm = 0.0
+
+        if tool == "bash":
+            coarse_str = _coarse_program(cmd)
+        else:
+            coarse_str = step.get("tool_name") or tool
+        cmd_hash_coarse = (
+            float((zlib.crc32(coarse_str.encode()) & 0xFFFFFFFF) * _CRC32_NORM)
+            if coarse_str else 0.0
+        )
+
+        cur_tokens = _command_token_set(cmd)
+        recent_token_jaccard = 0.0
+        if cur_tokens and recent_token_sets:
+            for prev in recent_token_sets:
+                if not prev:
+                    continue
+                inter = len(cur_tokens & prev)
+                union = len(cur_tokens | prev)
+                if union > 0:
+                    j = inter / union
+                    if j > recent_token_jaccard:
+                        recent_token_jaccard = j
+
         feat = {
             "tool_idx": TOOL_TO_IDX[tool],
             "cmd_hash": float(cmd_hash_int * _CRC32_NORM) if cmd_hash_int is not None else 0.0,
@@ -197,9 +301,13 @@ def compute_step_features(steps: list[dict]) -> list[dict]:
             "output_length": float(math.log1p(output.count("\n"))),
             "is_error": 1.0 if _has_error_indicators(output) else 0.0,
             "step_index_norm": float(i) / float(max(total_steps - 1, 1)),
+            "file_repeat_count_norm": float(file_repeat_count_norm),
+            "cmd_hash_coarse": float(cmd_hash_coarse),
+            "recent_token_jaccard": float(recent_token_jaccard),
         }
         result.append(feat)
 
+        # Update state AFTER recording (don't count current step in its own features)
         if cmd_hash_int is not None and not is_edit_tool:
             slots = output_history.get(cmd_hash_int)
             if slots is None:
@@ -208,6 +316,11 @@ def compute_step_features(steps: list[dict]) -> list[dict]:
                 slots.append(output_set)
                 if len(slots) > OUTPUT_HISTORY_SLOTS:
                     slots.pop(0)
+        for p in cur_paths:
+            file_touch_count[p] = file_touch_count.get(p, 0) + 1
+        recent_token_sets.append(cur_tokens)
+        if len(recent_token_sets) > RECENT_TOKEN_HISTORY:
+            recent_token_sets.pop(0)
 
     return result
 

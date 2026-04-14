@@ -1,17 +1,13 @@
 /**
- * v5 per-step MLP inference (no score history, no step_index_norm).
+ * Per-step MLP inference. Supports both v5 (42-dim, 7 features × 6 slots) and
+ * v6 (60-dim, 10 features × 6 slots) checkpoints — the dimension is inferred
+ * from the loaded fc1.weight shape so the same code serves both.
  *
- * Architecture: Linear(42,64) → ReLU → Linear(64,32) → ReLU → Linear(32,1) → Sigmoid
- * Normalization: mean/std applied to all 42 dims (every input is a feature).
- *
- * History: removed score feedback (5 dims) and step_index_norm (1 dim × 6 slots).
- * Both were either weak signal or had train/inference mismatches; multi-seed
- * ablation showed no statistically significant cost to dropping them.
+ * Architecture: Linear(input_dim,64) → ReLU → Linear(64,32) → ReLU → Linear(32,1) → Sigmoid
+ * Normalization: mean/std applied to every dim (no score-history dimension).
  */
 
 import { readFileSync } from 'node:fs'
-
-const INPUT_DIM = 42
 
 /**
  * Load an MLP instance from a JSON weights file.
@@ -27,25 +23,30 @@ export function loadMLP(weightsPath) {
 export class MLP {
   /** @param {object} weights  parsed stuck_weights.json */
   constructor(weights) {
-    this._fc1w = weights['fc1.weight'] // 64 × 53
+    this._fc1w = weights['fc1.weight'] // 64 × input_dim
     this._fc1b = weights['fc1.bias'] // 64
     this._fc2w = weights['fc2.weight'] // 32 × 64
     this._fc2b = weights['fc2.bias'] // 32
     this._fc3w = weights['fc3.weight'] // 1 × 32
     this._fc3b = weights['fc3.bias'] // 1
-    this._mean = new Float32Array(weights['norm_mean']) // 53
-    this._std = new Float32Array(weights['norm_std']) // 53
+    this._mean = new Float32Array(weights['norm_mean'])
+    this._std = new Float32Array(weights['norm_std'])
+    // Infer input_dim from the fc1 weight shape: rows are output, cols are input
+    this.inputDim = this._fc1w[0].length
+    // featureDim is inputDim / (1 + N_HISTORY); N_HISTORY=5 in the production
+    // pipeline, so 42→7 (v5), 60→10 (v6).
+    this.featureDim = Math.round(this.inputDim / 6)
   }
 
   /**
    * Run the forward pass on a raw (un-normalized) input vector.
    *
-   * @param {Float32Array} input  length-53 input from RingBuffer.buildInput()
+   * @param {Float32Array} input  length-inputDim input from RingBuffer.buildInput()
    * @returns {number}  sigmoid score in [0, 1]
    */
   forward(input) {
-    const x = new Float32Array(INPUT_DIM)
-    for (let i = 0; i < INPUT_DIM; i++) {
+    const x = new Float32Array(this.inputDim)
+    for (let i = 0; i < this.inputDim; i++) {
       x[i] = (input[i] - this._mean[i]) / (this._std[i] || 1e-6)
     }
 

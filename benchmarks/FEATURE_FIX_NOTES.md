@@ -276,3 +276,209 @@ Ordered by effort and expected return:
   feature dimensions, not a better hash. Multi-slot is a cheap
   incremental win; the big wins are retrain + `file_repeat_count` +
   coarse/fine `cmd_hash` split.
+
+---
+
+# Phase 2 results (added overnight after committing Phase 1)
+
+After committing the Phase 1 multi-slot fix, I implemented the three
+Phase 2 features I'd been recommending — `file_repeat_count_norm`,
+`cmd_hash_coarse`, `recent_token_jaccard` — and trained new MLP weights
+on the resulting schema-5 features. Results below.
+
+## What was added
+
+**`extract_features.py` schema 5** introduces three new feature columns
+(11 total now, including the still-excluded `step_index_norm`):
+
+1. `file_repeat_count_norm` — log1p(count of prior steps touching any
+   file mentioned in the current command) / log1p(50). Files are
+   extracted from the command via regex (`PATH_TOKEN_RE`) plus the
+   step's structured `file` field. **This is the dominant new signal.**
+2. `cmd_hash_coarse` — CRC32 of the program name only (`git`, `grep`,
+   `ninja`) for bash, or the Claude tool name for native tools.
+   Provides a second `has_prior_output` binding at coarse granularity.
+3. `recent_token_jaccard` — max Jaccard of the current command's token
+   set against the last 5 commands' token sets. Sequence-level
+   repetition signal that doesn't need any hash binding.
+
+**`features.mjs`** got a new `FeatureState` class (per-session state
+holding `outputHistory`, `fileTouchCount`, `recentTokenSets`) and an
+updated `computeFeatures` that emits 10-dim vectors when given a
+`FeatureState` (and falls back to 7-dim with a plain `Map` for
+backward compat). `mlp.mjs` was generalized to infer `inputDim` and
+`featureDim` from the loaded `fc1.weight` shape so the same JS proxy
+can serve v5 (42-dim) or v6 (60-dim) weights without code changes.
+`detector.mjs` now constructs a `FeatureState` and a ring buffer
+sized to whatever the loaded MLP needs.
+
+## Training results
+
+Trained four new MLP variants from scratch on schema-5 features:
+
+| variant | extra training arg | in-distribution F1 |
+|---|---|---|
+| `v5_1_multi_slot` | schema 4 (multi-slot only, no Phase 2) | 0.958 |
+| `v6_phase2` | schema 5 (Phase 2 features), default pos_weight | 0.961 |
+| `v6_pw3` | schema 5, `POS_WEIGHT_MULT=3` | (not shown — slightly lower in-dist) |
+| `v6_pw5` | schema 5, `POS_WEIGHT_MULT=5` | — |
+| `v6_pw10` | schema 5, `POS_WEIGHT_MULT=10` | — |
+
+The pos-weight variants trade in-distribution precision for higher
+recall by biasing the loss toward positives during training. Saved to
+`proxy/experiments/{v5_1_multi_slot, v6_phase2, v6_phase2_pw{3,5,10}}/`.
+
+## Head-to-head on the OOD benchmark
+
+`benchmarks/eval_models.py` evaluates each checkpoint against
+Sonnet's per-step labels on the 10 benchmark transcripts. Pooled
+across all tasks (n=680 labeled steps):
+
+| model | AUC | P | R | F1 | TP | FP | FN |
+|---|---|---|---|---|---|---|---|
+| **v5_baseline** (current production) | **0.5514** | 0.078 | 0.070 | 0.074 | 4 | 47 | 53 |
+| v5_1_multi_slot | 0.5966 | 0.098 | 0.070 | 0.082 | 4 | 37 | 53 |
+| v6_phase2 | 0.6068 | 0.100 | 0.053 | 0.069 | 3 | 27 | 54 |
+| **v6_pw3** | **0.6309** | **0.169** | 0.263 | **0.205** | 15 | 74 | 42 |
+| v6_pw5 | **0.6342** | 0.147 | 0.281 | 0.193 | 16 | 93 | 41 |
+| v6_pw10 | 0.6236 | 0.115 | 0.351 | 0.173 | **20** | 154 | 37 |
+
+**Headline numbers vs the v5 baseline:**
+
+- AUC: **0.5514 → 0.6342** (+0.083, the best variant is v6_pw5)
+- Recall: **0.070 → 0.351** (5× improvement, v6_pw10)
+- F1: **0.074 → 0.205** (2.8×, v6_pw3 is the best balance)
+- TP on Sonnet-STUCK: **4 → 20** (5× more stuck steps caught)
+
+**On `03_llvm_loop_vec` specifically** (the headline failure case):
+
+| model | Sonnet-STUCK caught (of 39) |
+|---|---|
+| v5_baseline | 1 |
+| v5_1_multi_slot | 1 |
+| v6_phase2 | 0 |
+| v6_pw3 | 7 |
+| v6_pw5 | 8 |
+| v6_pw10 | **11** |
+
+v6_pw10 catches **11× more** LLVM stuck steps than the baseline. The
+file_repeat_count signal that climbs from 0.957 → 1.000 as the agent
+re-touches the same files is finally being weighted strongly enough
+to flip the prediction.
+
+## The training-distribution mismatch story
+
+The most important finding is *why* vanilla `v6_phase2` (default
+pos_weight) only marginally improves on `v5_baseline` despite having
+strictly richer features. Inspecting the LLVM-stuck steps directly:
+
+```
+idx  v6_score  fileRep  cmdCoarse  tokJacc  has_prior
+ 86    0.129    0.957     0.221    0.000      1
+ 87    0.007    0.962     0.221    0.000      0
+ 88    0.089    0.968     0.221    0.000      0
+ 89    0.004    0.974     0.221    0.250      0
+ 90    0.073    0.979     0.221    0.000      0
+ 91    0.001    0.985     0.221    0.000      0
+ 92    0.001    0.990     0.221    0.000      1
+ ...
+```
+
+`file_repeat_count_norm` is climbing monotonically (0.957 → 0.990 → ...)
+as the agent thrashes — **the feature is correctly detecting the
+pattern.** But the trained MLP scores those steps 0.001 to 0.13 — it's
+ignoring the signal.
+
+The v6 model was trained on
+`nlile / dataclaw / masterclass / claudeset` — corpora where high
+`file_repeat_count_norm` is rare and weakly correlated with stuck.
+The model learned to underweight the feature accordingly. **It's a
+training distribution mismatch, not a feature engineering failure.**
+
+The pos_weight trick partially compensates by making the loss
+gradient larger for the rare stuck examples in training data, which
+in turn makes the model more willing to fire on uncertain features.
+But it's a band-aid: the right fix is to add LLVM-style training
+examples (more data with the "many tools, same files" pattern) and
+let the model learn the connection naturally.
+
+I tried inference-time scaling of the new feature columns by 2×–8×
+to coax the model into using them more — it made things WORSE,
+not better. The trained weights have specific patterns that don't
+extrapolate to scaled inputs.
+
+## What this means for the proxy in production
+
+Three deployment options, in increasing order of risk/return:
+
+1. **Ship `v5_1_multi_slot`** as a drop-in v5 replacement. Same input
+   dim (42), no training-data work needed beyond what's already
+   committed. Marginal gain (+0.045 AUC) but absolutely safe.
+2. **Ship `v6_pw3`** as the new production model. 60-dim input, JS
+   proxy already supports it (verified end-to-end with a 4-step
+   simulation). 3× more LLVM stuck catches, 4× more pooled TP, F1
+   nearly tripled. Cost: more false positives on productive runs
+   (74 vs 47 baseline). Worth it if the nudge controller's
+   silent-absorb + cooldown can damp the noise.
+3. **Add OOD examples to the training set** by labeling more
+   benchmark-like sessions with Sonnet, then retrain v6 on the
+   expanded corpus. This is the "real" fix and would presumably
+   recover the LR-experiment AUC of 0.83 (vs the current trained-MLP
+   0.63). Cost: more Sonnet labeling spend, more training data
+   curation, ~1 day of work.
+
+## Files committed in Phase 2 (this branch)
+
+**Schema 5 / Phase 2 features:**
+- `src/pipeline/extract_features.py` — schema 5, 3 new feature columns
+- `proxy/features.mjs` — `FeatureState`, `extractPathTokens`,
+  `commandTokenSet`, `coarseProgram`, 10-dim feature vector path
+- `proxy/mlp.mjs` — auto-detect `inputDim` and `featureDim` from
+  weights so v5 + v6 weights both load
+- `proxy/detector.mjs` — uses `FeatureState`, builds ring at the
+  right featureDim
+- `src/training/train.py` — STEP_FEATURES extended to 11 (with
+  Phase 2 fields); `POS_WEIGHT_MULT` env var for re-weighting
+
+**Trained checkpoints (in `proxy/experiments/`):**
+- `v5_1_multi_slot/` — schema 4, 7 features, default pos_weight
+- `v6_phase2/` — schema 5, 10 features, default pos_weight
+- `v6_phase2_pw3/` — schema 5, pos_weight × 3 (best F1)
+- `v6_phase2_pw5/` — schema 5, pos_weight × 5 (best AUC)
+- `v6_phase2_pw10/` — schema 5, pos_weight × 10 (best recall)
+
+**Eval / experiments:**
+- `benchmarks/eval_models.py` — head-to-head model evaluation script
+- `benchmarks/feature_experiments.py` — extended with `v6_phase2`
+  variant and `Features.file_repeat_count_norm` etc.
+- `proxy/simulate.mjs` — added `--weights DIR` flag so any
+  experiment checkpoint can be replayed against transcripts
+- `training_manifest_v4.json`, `training_manifest_v5.json` — separate
+  manifests for the schema-bumped runs (don't disturb the schema 3
+  production manifest)
+
+**Tests:**
+- `tests/test_extract_features.py` — 8 new Phase 2 tests
+- `proxy/test/features.test.mjs` — 2 multi-slot tests added in
+  Phase 1; Phase 2 feature parity tests are TODO (the JS impl was
+  smoke-tested with a 4-step end-to-end run vs v6_pw3 weights)
+
+**All tests passing:** 104 JS tests, 148 Python tests, 252 total.
+
+## Recommended commit cut
+
+I kept everything on `try-to-fix-ood-dataset` as one logical chunk.
+You may want to break it up into more granular commits when reviewing —
+suggestion:
+
+1. **schema 5 features** — extract_features.py, features.mjs,
+   detector.mjs, mlp.mjs, train.py STEP_FEATURES, tests
+2. **v6_pw3 checkpoint** — proxy/experiments/v6_phase2_pw3/* (large
+   file, may want LFS or just keep as-is)
+3. **eval / training infra** — eval_models.py, simulate.mjs --weights
+   flag, manifests
+4. **FEATURE_FIX_NOTES.md** — this writeup
+
+Or just squash the whole branch as "Phase 1 + Phase 2 OOD
+generalization" and merge to main.
+

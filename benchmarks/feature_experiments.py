@@ -172,6 +172,16 @@ FEATURE_FIELDS = (
     "tool_idx", "cmd_hash", "file_hash", "output_similarity",
     "has_prior_output", "output_length", "is_error",
 )
+PHASE2_FIELDS = (
+    "file_repeat_count_norm", "cmd_hash_coarse", "recent_token_jaccard",
+)
+# Path-extraction regex: things that look like file paths in a command.
+# Catches /abs/path/to/file.ext, ./relative/path, plain file.ext, dir/file.
+PATH_TOKEN_RE = re.compile(
+    r"(?:/?[\w@.\-]+/)+[\w@.\-]+(?:\.[a-zA-Z0-9_]{1,8})?|[\w@.\-]+\.[a-zA-Z0-9_]{1,8}"
+)
+# Token splitter for token-jaccard feature: word-like chunks of >=2 chars
+TOKEN_SPLIT_RE = re.compile(r"[A-Za-z_][\w./\-]+|\b\d+\b")
 
 
 @dataclass
@@ -183,6 +193,10 @@ class Features:
     has_prior_output: float
     output_length: float
     is_error: float
+    # Phase 2 candidate features. Default 0 so v0–v5 variants don't see them.
+    file_repeat_count_norm: float = 0.0
+    cmd_hash_coarse: float = 0.0
+    recent_token_jaccard: float = 0.0
     _meta_key: str = ""  # for debugging
 
 
@@ -350,11 +364,58 @@ def _bash_parser_key(cmd: str) -> str:
 
 # ─── Feature computation engines, one per variant ──────────────────────────
 
-def _make_engine(key_fn: Callable[[str], str], multi_slot: bool):
+def _extract_path_tokens(text: str) -> set[str]:
+    """Pull file/path-like tokens out of a free-form command string."""
+    if not text:
+        return set()
+    out = set()
+    for m in PATH_TOKEN_RE.finditer(text):
+        tok = m.group(0).strip()
+        # Drop things that are clearly NOT files: pure digits, single chars
+        if len(tok) < 2:
+            continue
+        if tok.isdigit():
+            continue
+        # Normalize to bare basename for deduplication, but also keep the
+        # full path so /a/b/foo.cpp and /c/d/foo.cpp are different files.
+        out.add(tok)
+    return out
+
+
+def _command_token_set(cmd: str) -> frozenset[str]:
+    """Token set for the recent-jaccard feature. Strips flags."""
+    if not cmd:
+        return frozenset()
+    tokens = TOKEN_SPLIT_RE.findall(cmd)
+    return frozenset(t.lower() for t in tokens if not t.startswith("-") and len(t) >= 2)
+
+
+def _coarse_program(cmd: str) -> str:
+    """Just the program name, no args, no path. 'git', 'grep', 'ninja', etc."""
+    if not cmd:
+        return ""
+    parts = re.split(r"\s*(?:&&|;)\s*", cmd.strip())
+    real = [p for p in parts if p.strip() and not SILENT_CMD_RE.match(p.strip())]
+    if not real:
+        tokens = cmd.strip().split()
+        if not tokens:
+            return ""
+        return tokens[0].rsplit("/", 1)[-1]
+    first = re.split(r"\s*\|\s*", real[0].strip())[0]
+    tokens = first.strip().split()
+    if not tokens:
+        return ""
+    return tokens[0].rsplit("/", 1)[-1]
+
+
+def _make_engine(key_fn: Callable[[str], str], multi_slot: bool, phase2: bool = False):
     """Return a function that computes features for a list of steps."""
 
     def engine(steps: list[dict]) -> list[Features]:
         output_history: dict[str, deque | frozenset] = {}
+        # Phase 2 state
+        file_touch_count: dict[str, int] = {}  # path → count of prior steps touching it
+        recent_token_sets: deque[frozenset[str]] = deque(maxlen=5)
         results: list[Features] = []
         for step in steps:
             tool = step["tool"]
@@ -392,6 +453,37 @@ def _make_engine(key_fn: Callable[[str], str], multi_slot: bool):
                 else:
                     sim = jaccard(cur_set, prior)
 
+            # ── Phase 2 features (always computed; only populated if phase2=True) ──
+            f_repeat = 0.0
+            f_coarse = 0.0
+            f_recent_jacc = 0.0
+            if phase2:
+                # Collect path-like tokens from the command + file field
+                cur_paths = _extract_path_tokens(step["cmd"])
+                if step["file"]:
+                    cur_paths.add(step["file"])
+                # file_repeat_count: sum of prior touches across these paths
+                if cur_paths:
+                    repeat_sum = sum(file_touch_count.get(p, 0) for p in cur_paths)
+                    f_repeat = math.log1p(repeat_sum) / math.log1p(50)  # normalize ~[0,1]
+                # cmd_hash_coarse: program name only for bash; tool name for native
+                if tool == "bash":
+                    coarse = _coarse_program(step["cmd"])
+                else:
+                    coarse = step["tool_name"]
+                f_coarse = crc32_float(coarse) if coarse else 0.0
+                # recent_token_jaccard: token similarity to last K commands' tokens (max)
+                cur_tokens = _command_token_set(step["cmd"])
+                if cur_tokens and recent_token_sets:
+                    f_recent_jacc = max(
+                        (jaccard(cur_tokens, prev) for prev in recent_token_sets),
+                        default=0.0,
+                    )
+                recent_token_sets.append(cur_tokens)
+                # Update file_touch_count *after* using it (don't count the current step)
+                for p in cur_paths:
+                    file_touch_count[p] = file_touch_count.get(p, 0) + 1
+
             feat = Features(
                 tool_idx=float(tool_idx),
                 cmd_hash=float(cmd_hash),
@@ -400,6 +492,9 @@ def _make_engine(key_fn: Callable[[str], str], multi_slot: bool):
                 has_prior_output=float(has_prior),
                 output_length=float(math.log1p(clean.count("\n"))),
                 is_error=1.0 if (clean and ERROR_PATTERNS.search(clean[:2000])) else 0.0,
+                file_repeat_count_norm=float(f_repeat),
+                cmd_hash_coarse=float(f_coarse),
+                recent_token_jaccard=float(f_recent_jacc),
                 _meta_key=cmd_key[:80],
             )
             results.append(feat)
@@ -425,7 +520,12 @@ VARIANTS: dict[str, Callable[[list[dict]], list[Features]]] = {
     "v3_bash_parse": _make_engine(_bash_parser_key,           multi_slot=False),
     "v4_combined":   _make_engine(_token_set_key,             multi_slot=True),
     "v5_scope_key":  _make_engine(_scope_key,                 multi_slot=True),
+    # Phase 2: v1 base + 3 new feature dimensions
+    "v6_phase2":     _make_engine(_current_cmd_semantic_key, multi_slot=True, phase2=True),
 }
+
+# Variants that include Phase 2 features (use 10-dim vector instead of 7)
+PHASE2_VARIANTS = {"v6_phase2"}
 
 
 # ─── Scoring against Sonnet labels ─────────────────────────────────────────
@@ -435,27 +535,26 @@ def _naive_stuck_score(f: Features) -> float:
     return 0.7 * f.output_similarity + 0.3 * f.has_prior_output
 
 
-def feature_vector(f: Features) -> list[float]:
-    return [
+def feature_vector(f: Features, phase2: bool = False) -> list[float]:
+    base = [
         f.tool_idx, f.cmd_hash, f.file_hash, f.output_similarity,
         f.has_prior_output, f.output_length, f.is_error,
     ]
+    if phase2:
+        base.extend([f.file_repeat_count_norm, f.cmd_hash_coarse, f.recent_token_jaccard])
+    return base
 
 
 def logreg_auc(features_by_task: dict[str, list[Features]],
-               labels_by_task: dict[str, list[str]]) -> tuple[float, dict]:
-    """Train a logistic regression on pooled features and report AUC.
-
-    Feature scaling: divide each column by its max value for stability.
-    Uses scikit-learn if present, falls back to a hand-coded sklearn-less
-    logistic regression if not.
-    """
+               labels_by_task: dict[str, list[str]],
+               phase2: bool = False) -> tuple[float, dict]:
+    """Train a logistic regression on pooled features and report AUC."""
     X, y = [], []
     for t in features_by_task:
         for feat, lbl in zip(features_by_task[t], labels_by_task[t]):
             if lbl == "UNSURE":
                 continue
-            X.append(feature_vector(feat))
+            X.append(feature_vector(feat, phase2=phase2))
             y.append(1 if lbl == "STUCK" else 0)
     if not X:
         return 0.0, {}
@@ -465,17 +564,16 @@ def logreg_auc(features_by_task: dict[str, list[Features]],
         from sklearn.metrics import roc_auc_score
         Xn = np.array(X, dtype=float)
         yn = np.array(y, dtype=int)
-        # Normalize columns
         maxes = np.maximum(Xn.max(axis=0), 1e-9)
         Xn /= maxes
         if yn.sum() == 0 or yn.sum() == len(yn):
             return 0.0, {"note": "degenerate class distribution"}
-        lr = LogisticRegression(max_iter=1000, class_weight="balanced")
+        lr = LogisticRegression(max_iter=2000, class_weight="balanced")
         lr.fit(Xn, yn)
         probs = lr.predict_proba(Xn)[:, 1]
         auc = roc_auc_score(yn, probs)
-        # Also report feature weights for interpretation
-        weights = dict(zip(FEATURE_FIELDS, lr.coef_[0].tolist()))
+        names = list(FEATURE_FIELDS) + (list(PHASE2_FIELDS) if phase2 else [])
+        weights = dict(zip(names, lr.coef_[0].tolist()))
         return float(auc), weights
     except ImportError:
         return 0.0, {"note": "sklearn not available"}
@@ -614,8 +712,10 @@ def main() -> int:
             n = min(len(steps), len(labels))
             feats_by_task[td.name] = VARIANTS[name](steps[:n])
             labels_by_task[td.name] = labels[:n]
-        auc, weights = logreg_auc(feats_by_task, labels_by_task)
-        print(f"{name:<16}AUC={auc:.4f}")
+        is_p2 = name in PHASE2_VARIANTS
+        auc, weights = logreg_auc(feats_by_task, labels_by_task, phase2=is_p2)
+        ndim = 10 if is_p2 else 7
+        print(f"{name:<16}AUC={auc:.4f}  (ndim={ndim})")
         if weights and "note" not in weights:
             ws = sorted(weights.items(), key=lambda kv: -abs(kv[1]))
             print("  weights:", " ".join(f"{k}={v:+.2f}" for k, v in ws))

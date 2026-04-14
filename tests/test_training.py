@@ -34,6 +34,12 @@ def _make_rows(n_sessions=10, steps_per_session=5) -> list[dict]:
                     "output_length": 1.0,
                     "is_error": 0.0,
                     "step_index_norm": float(i) / max(steps_per_session - 1, 1),
+                    # Phase 2 features (schema 5). Default to 0 so existing
+                    # test assertions about feature counts stay valid; tests
+                    # that care about specific values can override.
+                    "file_repeat_count_norm": 0.0,
+                    "cmd_hash_coarse": 0.0,
+                    "recent_token_jaccard": 0.0,
                     "label": 1.0 if (s % 5 == 0 and i > 2) else (0.5 if i == 1 else 0.0),
                 }
             )
@@ -202,17 +208,17 @@ class TestBuildSequences:
         by_session = {"sess_000": rows}
 
         full, _, _ = build_sequences(by_session, use_score_history=False)
-        # Drop the last feature (step_index_norm at index 7)
+        # Drop step_index_norm (one feature dropped → kept = NUM_FEATURES - 1)
         partial, _, _ = build_sequences(
             by_session,
             use_score_history=False,
             excluded_features={"step_index_norm"},
         )
 
-        # Step 0 first 7 features must match step 0 first 7 of full
+        # The first 7 features (everything before step_index_norm) must match
         np.testing.assert_array_equal(full[0, :7], partial[0, :7])
-        # And the partial input should not include the dropped 8th column
-        assert partial.shape[1] == 7 * (1 + N_HISTORY)  # 42
+        # Partial dim = (NUM_FEATURES - 1) × (1 + N_HISTORY)
+        assert partial.shape[1] == (NUM_FEATURES - 1) * (1 + N_HISTORY)
 
 
 class TestBuildSequencesRingBuffer:

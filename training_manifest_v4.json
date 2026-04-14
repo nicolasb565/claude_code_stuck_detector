@@ -1,0 +1,10 @@
+{
+  "schema_version": 4,
+  "_note": "Schema 4 = multi-slot output history fix. Phase 1 of OOD generalization work.",
+  "datasets": [
+    {"source_dir": "datasets/nlile/",          "path": "data/generated/nlile_v4.jsonl",          "weight": 1.0},
+    {"source_dir": "datasets/dataclaw_claude/", "path": "data/generated/dataclaw_claude_v4.jsonl", "weight": 1.0},
+    {"source_dir": "datasets/masterclass/",    "path": "data/generated/masterclass_v4.jsonl",    "weight": 1.0},
+    {"source_dir": "datasets/claudeset/",      "path": "data/generated/claudeset_v4.jsonl",      "weight": 1.0}
+  ]
+}

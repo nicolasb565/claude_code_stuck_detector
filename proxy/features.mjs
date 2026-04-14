@@ -52,6 +52,57 @@ const SYSTEM_REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/gi
 const ERROR_RE =
   /error|traceback|exception|failed|failure|fatal|cannot|unable to|not found|permission denied|segmentation fault|core dumped|FAIL|ModuleNotFoundError|ImportError|SyntaxError|TypeError|ValueError|KeyError|AttributeError|RuntimeError|FileNotFoundError/i
 
+// Phase 2 helpers — must produce identical keys to extract_features.py's
+// _PATH_TOKEN_RE / _TOKEN_SPLIT_RE / _coarse_program for train/inference parity.
+const PATH_TOKEN_RE = /(?:\/?[\w@.\-]+\/)+[\w@.\-]+(?:\.[a-zA-Z0-9_]{1,8})?|[\w@.\-]+\.[a-zA-Z0-9_]{1,8}/g
+const TOKEN_SPLIT_RE = /[A-Za-z_][\w./\-]+|\b\d+\b/g
+const RECENT_TOKEN_HISTORY = 5
+// log1p(50) ≈ 3.93; matches Python _FILE_REPEAT_NORM
+const FILE_REPEAT_NORM = Math.log1p(50)
+
+function extractPathTokens(text) {
+  if (!text) return new Set()
+  const out = new Set()
+  const re = new RegExp(PATH_TOKEN_RE.source, 'g')
+  let m
+  while ((m = re.exec(text)) !== null) {
+    const tok = m[0].trim()
+    if (tok.length < 2) continue
+    if (/^\d+$/.test(tok)) continue
+    out.add(tok)
+  }
+  return out
+}
+
+function commandTokenSet(cmd) {
+  if (!cmd) return new Set()
+  const out = new Set()
+  const re = new RegExp(TOKEN_SPLIT_RE.source, 'g')
+  let m
+  while ((m = re.exec(cmd)) !== null) {
+    const tok = m[0]
+    if (tok.startsWith('-')) continue
+    if (tok.length < 2) continue
+    out.add(tok.toLowerCase())
+  }
+  return out
+}
+
+function coarseProgram(cmd) {
+  if (!cmd) return ''
+  const parts = cmd.trim().split(/\s*(?:&&|;)\s*/)
+  const real = parts.filter((p) => p.trim() && !SILENT_CMD_RE.test(p.trim()))
+  if (real.length === 0) {
+    const tokens = cmd.trim().split(/\s+/)
+    if (tokens.length === 0 || !tokens[0]) return ''
+    return tokens[0].split('/').pop()
+  }
+  const first = real[0].trim().split(/\s*\|\s*/)[0]
+  const tokens = first.trim().split(/\s+/)
+  if (tokens.length === 0 || !tokens[0]) return ''
+  return tokens[0].split('/').pop()
+}
+
 /**
  * Parse a raw Claude Code tool call into a normalized step dict.
  *
@@ -185,17 +236,37 @@ export function maxJaccard(setA, priors) {
 }
 
 /**
- * Compute the 7 v5 per-step features for one tool call.
+ * Per-session feature extraction state. v5 sessions hold just outputHistory;
+ * v6 (Phase 2) sessions hold three additional caches for the new features.
  *
- * Side effect: mutates outputHistory by appending the current step's
- * outputSet to the slot list keyed by cmdHashInt. Slots are bounded to
- * OUTPUT_HISTORY_SLOTS entries (FIFO eviction).
+ * Constructed by SessionDetector. Mutated in-place by computeFeatures.
+ */
+export class FeatureState {
+  constructor() {
+    this.outputHistory = new Map() // cmdHashInt → Set[] (length ≤ OUTPUT_HISTORY_SLOTS)
+    this.fileTouchCount = new Map() // file path → count of prior steps touching it
+    this.recentTokenSets = [] // last RECENT_TOKEN_HISTORY token sets
+  }
+}
+
+/**
+ * Compute the 10 v6 per-step features (or 7 if state is a plain Map for
+ * backward compat).
+ *
+ * Side effects: appends current outputSet to the slot list, bumps file
+ * touch counts, pushes current token set onto recentTokenSets ring.
  *
  * @param {{ tool: string, cmd: string, file: string|null, output: string }} step
- * @param {Map<number, Set[]>} outputHistory  keyed by cmdHashInt, mutated in-place
- * @returns {Float32Array}  length-7 feature vector
+ * @param {FeatureState|Map} state  per-session feature state
+ * @returns {Float32Array}  length-7 (legacy) or length-10 (Phase 2) feature vector
  */
-export function computeFeatures(step, outputHistory) {
+export function computeFeatures(step, state) {
+  // Backward-compat: if state is a plain Map (old code path), treat it as
+  // the outputHistory and emit 7-feature vectors. New code passes a
+  // FeatureState instance and gets 10 features.
+  const isPhase2 = state instanceof FeatureState
+  const outputHistory = isPhase2 ? state.outputHistory : state
+
   const { tool, cmd, file, output } = step
   const toolIdx = TOOL_TO_IDX[tool] ?? TOOL_TO_IDX['other']
 
@@ -212,7 +283,41 @@ export function computeFeatures(step, outputHistory) {
   const hasPrior = !isEditTool && priors !== undefined && priors.length > 0
   const outputSim = isEditTool ? 0.0 : maxJaccard(outputSet, priors)
 
-  const features = new Float32Array(7)
+  // ── Phase 2 features ────────────────────────────────────────────────
+  let fileRepeatNorm = 0
+  let cmdHashCoarse = 0
+  let recentTokenJacc = 0
+  let curPaths = null
+  let curTokens = null
+  if (isPhase2) {
+    curPaths = extractPathTokens(cmd)
+    if (file) curPaths.add(file)
+    if (curPaths.size > 0) {
+      let repeatSum = 0
+      for (const p of curPaths) repeatSum += state.fileTouchCount.get(p) ?? 0
+      fileRepeatNorm = Math.min(1.0, Math.log1p(repeatSum) / FILE_REPEAT_NORM)
+    }
+    const coarseStr = tool === 'bash' ? coarseProgram(cmd) : (step.tool_name ?? tool)
+    if (coarseStr) {
+      cmdHashCoarse = (crc32(Buffer.from(coarseStr, 'utf8')) >>> 0) * CRC32_NORM
+    }
+    curTokens = commandTokenSet(cmd)
+    if (curTokens.size > 0 && state.recentTokenSets.length > 0) {
+      for (const prev of state.recentTokenSets) {
+        if (prev.size === 0) continue
+        let inter = 0
+        for (const t of curTokens) if (prev.has(t)) inter++
+        const union = curTokens.size + prev.size - inter
+        if (union > 0) {
+          const j = inter / union
+          if (j > recentTokenJacc) recentTokenJacc = j
+        }
+      }
+    }
+  }
+
+  const featLen = isPhase2 ? 10 : 7
+  const features = new Float32Array(featLen)
   features[0] = toolIdx
   features[1] = cmdHashInt !== null ? cmdHashInt * CRC32_NORM : 0.0
   features[2] = fileHashInt !== null ? fileHashInt * CRC32_NORM : 0.0
@@ -220,7 +325,13 @@ export function computeFeatures(step, outputHistory) {
   features[4] = hasPrior ? 1.0 : 0.0
   features[5] = Math.log1p(cleanOutput ? cleanOutput.split('\n').length - 1 : 0)
   features[6] = cleanOutput && ERROR_RE.test(cleanOutput.slice(0, 2000)) ? 1.0 : 0.0
+  if (isPhase2) {
+    features[7] = fileRepeatNorm
+    features[8] = cmdHashCoarse
+    features[9] = recentTokenJacc
+  }
 
+  // ── State updates (after recording features) ────────────────────────
   if (cmdHashInt !== null && !isEditTool) {
     const slots = outputHistory.get(cmdHashInt)
     if (slots === undefined) {
@@ -228,6 +339,17 @@ export function computeFeatures(step, outputHistory) {
     } else {
       slots.push(outputSet)
       if (slots.length > OUTPUT_HISTORY_SLOTS) slots.shift()
+    }
+  }
+  if (isPhase2) {
+    if (curPaths) {
+      for (const p of curPaths) {
+        state.fileTouchCount.set(p, (state.fileTouchCount.get(p) ?? 0) + 1)
+      }
+    }
+    if (curTokens) {
+      state.recentTokenSets.push(curTokens)
+      if (state.recentTokenSets.length > RECENT_TOKEN_HISTORY) state.recentTokenSets.shift()
     }
   }
 

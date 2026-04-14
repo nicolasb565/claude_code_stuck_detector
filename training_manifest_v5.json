@@ -1,0 +1,10 @@
+{
+  "schema_version": 5,
+  "_note": "Schema 5 = multi-slot history + 3 Phase 2 features (file_repeat_count_norm, cmd_hash_coarse, recent_token_jaccard). Phase 2 of OOD generalization work.",
+  "datasets": [
+    {"source_dir": "datasets/nlile/",          "path": "data/generated/nlile_v5.jsonl",          "weight": 1.0},
+    {"source_dir": "datasets/dataclaw_claude/", "path": "data/generated/dataclaw_claude_v5.jsonl", "weight": 1.0},
+    {"source_dir": "datasets/masterclass/",    "path": "data/generated/masterclass_v5.jsonl",    "weight": 1.0},
+    {"source_dir": "datasets/claudeset/",      "path": "data/generated/claudeset_v5.jsonl",      "weight": 1.0}
+  ]
+}

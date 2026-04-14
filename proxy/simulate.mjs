@@ -53,6 +53,7 @@ function parseArgs(argv) {
     skipSoft: false,
     silentBuffer: 1,
     json: false,
+    weights: null,  // path to alt weights dir (must contain stuck_weights.json + stuck_config.json)
   }
   const a = argv.slice(2)
   for (let i = 0; i < a.length; i++) {
@@ -65,12 +66,15 @@ function parseArgs(argv) {
     else if (arg === '--strategy-b') out.strategyB    = true
     else if (arg === '--dump-features') out.dumpFeatures = true
     else if (arg === '--json')       out.json         = true
+    else if (arg === '--weights')    out.weights      = a[++i]
     else if (arg.startsWith('--'))   { console.error('unknown flag:', arg); process.exit(2) }
     else if (!out.transcript)        out.transcript   = arg
     else                             { console.error('unexpected arg:', arg); process.exit(2) }
   }
   if (!out.transcript) {
     console.error('usage: simulate.mjs <transcript.jsonl> [flags]')
+    console.error('       --weights DIR  load stuck_weights.json+stuck_config.json from DIR')
+    console.error('                      (default: proxy/, alternates under proxy/experiments/)')
     process.exit(2)
   }
   return out
@@ -78,9 +82,12 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv)
 
-// Load classifier + config (same files the proxy uses)
-const mlp = loadMLP(resolve(__dirname, 'stuck_weights.json'))
-const config = JSON.parse(readFileSync(resolve(__dirname, 'stuck_config.json'), 'utf8'))
+// Load classifier + config — either from the production proxy/ dir or
+// from a user-supplied --weights directory (must contain stuck_weights.json
+// and stuck_config.json with matching schema).
+const weightsDir = args.weights ? resolve(args.weights) : __dirname
+const mlp = loadMLP(resolve(weightsDir, 'stuck_weights.json'))
+const config = JSON.parse(readFileSync(resolve(weightsDir, 'stuck_config.json'), 'utf8'))
 const threshold = args.threshold ?? config.threshold
 
 // ── Transcript → messages array ────────────────────────────────────────────

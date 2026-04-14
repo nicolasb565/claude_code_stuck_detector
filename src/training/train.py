@@ -34,11 +34,15 @@ STEP_FEATURES = [
     "output_length",
     "is_error",
     "step_index_norm",
+    # Phase 2 (schema 5):
+    "file_repeat_count_norm",
+    "cmd_hash_coarse",
+    "recent_token_jaccard",
 ]
 
-NUM_FEATURES = len(STEP_FEATURES)  # 8
-INPUT_DIM = NUM_FEATURES * (1 + N_HISTORY) + N_HISTORY  # 53
-INPUT_DIM_NO_SCORES = NUM_FEATURES * (1 + N_HISTORY)  # 48
+NUM_FEATURES = len(STEP_FEATURES)  # 11 with Phase 2
+INPUT_DIM = NUM_FEATURES * (1 + N_HISTORY) + N_HISTORY  # 71
+INPUT_DIM_NO_SCORES = NUM_FEATURES * (1 + N_HISTORY)  # 66
 
 
 class StuckDetectorV5(nn.Module):
@@ -290,9 +294,12 @@ def train(  # pylint: disable=too-many-statements,too-many-locals,too-many-branc
 
     num_pos = int((train_labels >= 0.9).sum())
     num_neg = len(train_labels) - num_pos
-    pos_weight = torch.tensor([num_neg / max(num_pos, 1)])
+    base_pw = num_neg / max(num_pos, 1)
+    pos_weight_multiplier = float(os.environ.get("POS_WEIGHT_MULT", "1.0"))
+    pos_weight = torch.tensor([base_pw * pos_weight_multiplier])
     print(
-        f"  Class balance: pos={num_pos} neg={num_neg} pos_weight={pos_weight.item():.1f}"
+        f"  Class balance: pos={num_pos} neg={num_neg} "
+        f"pos_weight={pos_weight.item():.1f} (base={base_pw:.1f} × mult={pos_weight_multiplier})"
     )
 
     train_loader = DataLoader(train_ds, batch_size=512, shuffle=True)
