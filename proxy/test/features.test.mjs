@@ -7,6 +7,7 @@ import {
   jaccard,
   normalizeToSet,
   TOOL_TO_IDX,
+  FeatureState,
 } from '../features.mjs'
 
 describe('parseToolCall', () => {
@@ -269,6 +270,123 @@ describe('computeFeatures', () => {
       new Map(),
     )
     assert.equal(feats1[1], feats2[1])
+  })
+})
+
+describe('Phase 2 features (FeatureState, 10-dim)', () => {
+  test('plain Map gives 7-dim vector (backward compat)', () => {
+    const feats = computeFeatures(
+      { tool: 'bash', cmd: 'ls', file: null, output: 'a' },
+      new Map(),
+    )
+    assert.equal(feats.length, 7)
+  })
+
+  test('FeatureState gives 10-dim vector', () => {
+    const feats = computeFeatures(
+      { tool: 'bash', cmd: 'ls', file: null, output: 'a' },
+      new FeatureState(),
+    )
+    assert.equal(feats.length, 10)
+  })
+
+  test('file_repeat_count_norm grows with repeated file touches', () => {
+    const state = new FeatureState()
+    const cmd = 'cat /scratch/foo.cpp'
+    const f0 = computeFeatures({ tool: 'bash', cmd, file: null, output: 'x' }, state)
+    const f1 = computeFeatures({ tool: 'bash', cmd, file: null, output: 'y' }, state)
+    const f2 = computeFeatures({ tool: 'bash', cmd, file: null, output: 'z' }, state)
+    assert.equal(f0[7], 0.0) // first touch
+    assert.ok(f1[7] > 0.0)
+    assert.ok(f2[7] > f1[7])
+    assert.ok(f2[7] <= 1.0)
+  })
+
+  test('file_repeat_count_norm zero when files do not overlap', () => {
+    const state = new FeatureState()
+    computeFeatures({ tool: 'bash', cmd: 'cat /a/foo.cpp', file: null, output: '' }, state)
+    const f = computeFeatures(
+      { tool: 'bash', cmd: 'cat /b/bar.cpp', file: null, output: '' },
+      state,
+    )
+    assert.equal(f[7], 0.0)
+  })
+
+  test('file_repeat_count_norm picks up native tool file field', () => {
+    const state = new FeatureState()
+    computeFeatures(
+      { tool: 'view', cmd: '/scratch/foo.cpp', file: '/scratch/foo.cpp', output: '' },
+      state,
+    )
+    const f = computeFeatures(
+      { tool: 'bash', cmd: 'grep bar /scratch/foo.cpp', file: null, output: '' },
+      state,
+    )
+    assert.ok(f[7] > 0)
+  })
+
+  test('cmd_hash_coarse collapses different git subcommands', () => {
+    const s1 = new FeatureState()
+    const s2 = new FeatureState()
+    const f1 = computeFeatures({ tool: 'bash', cmd: 'git log --oneline', file: null, output: '' }, s1)
+    const f2 = computeFeatures({ tool: 'bash', cmd: 'git diff HEAD', file: null, output: '' }, s2)
+    assert.equal(f1[8], f2[8])  // both → just "git"
+  })
+
+  test('cmd_hash_coarse uses tool name for non-bash', () => {
+    const s = new FeatureState()
+    const f1 = computeFeatures(
+      { tool: 'view', tool_name: 'Read', cmd: '/a/b.txt', file: '/a/b.txt', output: '' },
+      s,
+    )
+    const f2 = computeFeatures(
+      { tool: 'view', tool_name: 'Read', cmd: '/c/d.txt', file: '/c/d.txt', output: '' },
+      s,
+    )
+    assert.equal(f1[8], f2[8])  // both Read tools → same coarse
+  })
+
+  test('recent_token_jaccard high for similar greps', () => {
+    const state = new FeatureState()
+    computeFeatures(
+      { tool: 'bash', cmd: 'grep -rn getSCEVExprForVPValue /scratch/llvm/lib', file: null, output: '' },
+      state,
+    )
+    const f = computeFeatures(
+      { tool: 'bash', cmd: 'grep -B5 getSCEVExprForVPValue /scratch/llvm/lib/foo.cpp', file: null, output: '' },
+      state,
+    )
+    assert.ok(f[9] > 0.3)
+  })
+
+  test('recent_token_jaccard low for unrelated commands', () => {
+    const state = new FeatureState()
+    computeFeatures({ tool: 'bash', cmd: 'git log', file: null, output: '' }, state)
+    const f = computeFeatures(
+      { tool: 'bash', cmd: 'ninja -C build opt', file: null, output: '' },
+      state,
+    )
+    assert.ok(f[9] < 0.2)
+  })
+
+  test('recent_token_jaccard zero on first command', () => {
+    const f = computeFeatures(
+      { tool: 'bash', cmd: 'grep foo bar.txt', file: null, output: '' },
+      new FeatureState(),
+    )
+    assert.equal(f[9], 0.0)
+  })
+
+  test('FeatureState multi-slot output history works the same as Map', () => {
+    // Same multi-slot test as the legacy path but with FeatureState
+    const state = new FeatureState()
+    computeFeatures({ tool: 'bash', cmd: 'ls', file: null, output: 'alpha\nbeta' }, state)
+    computeFeatures({ tool: 'bash', cmd: 'ls', file: null, output: 'gamma\ndelta' }, state)
+    const f3 = computeFeatures(
+      { tool: 'bash', cmd: 'ls', file: null, output: 'alpha\nbeta' },
+      state,
+    )
+    assert.equal(f3[3], 1.0) // output_similarity matches first ls (older slot)
   })
 })
 
