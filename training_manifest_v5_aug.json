@@ -1,0 +1,26 @@
+{
+  "schema_version": 5,
+  "_note": "Schema 5 + 7-task benchmark augmentation. Held-out: 01_gcc_sccvn, 02_gcc_mul_overflow, 06_django_async",
+  "datasets": [
+    {
+      "path": "data/generated/nlile_v5.jsonl",
+      "weight": 1.0
+    },
+    {
+      "path": "data/generated/dataclaw_claude_v5.jsonl",
+      "weight": 1.0
+    },
+    {
+      "path": "data/generated/masterclass_v5.jsonl",
+      "weight": 1.0
+    },
+    {
+      "path": "data/generated/claudeset_v5.jsonl",
+      "weight": 1.0
+    },
+    {
+      "path": "data/generated/benchmark_aug_v5.jsonl",
+      "weight": 1.0
+    }
+  ]
+}
