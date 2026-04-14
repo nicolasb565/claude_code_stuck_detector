@@ -12,15 +12,15 @@ implementing. Scope is v1 only — anything tagged "v2" or "deferred" is out.
    real-world Claude Code performance on out-of-distribution tasks.
 2. **Two-mode comparison**: proxy off (baseline) vs proxy on (with stuck
    detection enabled). Same tasks, same model, same fixtures.
-3. **Per-task Docker isolation** so 12 tasks run in parallel without state leak
+3. **Per-task Docker isolation** so 10 tasks run in parallel without state leak
    and with clean reproducibility.
 4. **Headline metric**: `(off median duration) - (on median duration)` per
    stuck-prone task. We are NOT chasing a pass/fail score for v1.
 
 ## Non-goals (v1)
 
-- Strict compile-and-test verify scripts for every task. Only 3 trivial verify
-  scripts (sqlite, rbtree, minicoro). Other tasks: just measure turns + duration.
+- Strict compile-and-test verify scripts for every task. Only 1 trivial verify
+  script (sqlite). Other tasks: just measure turns + duration.
 - Nudge strategy A/B (current vs long-loop focused). That is a separate
   experiment after the baseline benchmark works. Tracked in
   `memory/project_next_steps.md`.
@@ -55,8 +55,6 @@ benchmarks/
     06_django_async/
     07_react_hooks/
     08_express_async/
-    24_rbtree/
-    27_minicoro_cet/
     30_lapack/
     32_beast/
     33_geometry/
@@ -81,7 +79,7 @@ JSON (matches the rest of the codebase — `training_manifest.json`,
 ```json
 {
   "schema_version": 1,
-  "claude_code_version": "1.0.45",
+  "claude_code_version": "2.1.105",
   "default_model": "claude-opus-4-6",
   "default_max_turns": 100,
   "tasks": [
@@ -97,15 +95,15 @@ JSON (matches the rest of the codebase — `training_manifest.json`,
       }
     },
     {
-      "id": "27_minicoro_cet",
-      "tier": 1,
-      "max_turns": 200,
+      "id": "30_lapack",
+      "tier": 2,
+      "max_turns": 100,
       "model": "claude-opus-4-6",
       "fixture": {
-        "url": "https://github.com/edubart/minicoro.git",
-        "ref": "main",
+        "url": "https://github.com/Reference-LAPACK/lapack.git",
+        "ref": "f954f62c",
         "shallow": true,
-        "build_cmd": "make tests"
+        "build_cmd": "mkdir -p build && cd build && cmake .. && ninja"
       }
     }
   ]
@@ -124,15 +122,13 @@ Per-task fields:
 
 ---
 
-## The 12 tasks
+## The 10 tasks
 
 | Tier | ID | Source repo | What | Why |
 |---|---|---|---|---|
 | 1 | `01_gcc_sccvn` | gcc | Bug PR 123310 (`-1U` vs `-1` in tree-ssa-sccvn.cc) | Known stuck case from previous benchmark, max 34 turns |
 | 1 | `02_gcc_mul_overflow` | gcc | Bug PR 123864 (match.pd unsigned 0xFFFFFFFF) | Known stuck case, 29-140 turns |
 | 1 | `03_llvm_loop_vec` | llvm-project | Loop vectorization miscompile | The worst stuck case in previous data: 1-161 turns, 8s-53min |
-| 1 | `24_rbtree` | synthetic | Fix red-black tree deletion rebalancing | The famous 671s→45s case from earlier nudge experiments |
-| 1 | `27_minicoro_cet` | edubart/minicoro | Fix segfault in debian:trixie docker (CET shadow stack) | User's real-world systems debugging case, completely OOD |
 | 2 | `06_django_async` | django/django | Async middleware error not caught by error handler | Variable 14-51 turns |
 | 2 | `30_lapack` | Reference-LAPACK/lapack | Numerical bug in a routine | Fortran, completely OOD |
 | 2 | `32_beast` | boostorg/boost (libs/beast) | HTTP/WebSocket bug | C++ template-heavy, 22-60 turns |
@@ -141,7 +137,15 @@ Per-task fields:
 | 3 | `07_react_hooks` | facebook/react | useEffect stale closure | Quick |
 | 3 | `08_express_async` | expressjs/express | Async middleware error | The known FP case — critical FP control |
 
-**6 stuck-prone, 6 productive** — balanced for measuring both halves of F1.
+**4 stuck-prone, 6 productive.** Two tasks dropped from the original 12:
+- `24_rbtree` — bundled source already fixed by a prior agent run, no
+  real bug to measure.
+- `27_minicoro_cet` — CET shadow stack can't be enabled under Docker's
+  default seccomp profile (arch_prctl SHSTK subcodes are filtered), and
+  upstream minicoro tests run cleanly without it. Repro would require a
+  custom seccomp profile plus CET-linked test binaries built by the
+  harness *before* the agent sees the bug, which contaminates the task.
+  Revisit in v2 if we want a bottled CET repro under its own seccomp.
 
 `max_turns` per tier:
 - Tier 1: **200** (capture even the 161-turn worst case with headroom)
@@ -149,6 +153,73 @@ Per-task fields:
 - Tier 3: **60**
 
 ---
+
+## Sources of truth
+
+Prompts, repo URLs/refs, and prior-run data live at
+`/home/nicolas/source/classifier-repos/`:
+- `prompts/NN_*.md` — task prompts (see task-id mapping below)
+- `worktrees/NN_*/` — reference clones, useful for sanity-checking refs
+- `boost/libs/{beast,geometry}/` — boost library worktrees
+- `MANIFEST.md` — per-task bug/ref notes
+- `run_tasks.sh` — prior runner; the cleanup block at lines ~45-60 shows
+  what kind of grime accumulates between runs
+
+Task-id mapping (benchmarks/ ↔ classifier-repos/prompts/):
+- `01_gcc_sccvn` ↔ `01_gcc_bug.md`
+- `02_gcc_mul_overflow` ↔ `02_gcc_bug.md`
+- `03_llvm_loop_vec` ↔ `03_llvm_bug.md`
+- `04_sqlite_cte` ↔ `04_sqlite_bug.md`
+- `06_django_async` ↔ `06_django_bug.md`
+- `07_react_hooks` ↔ `07_react_bug.md`
+- `08_express_async` ↔ `08_express_bug.md`
+- `30_lapack` ↔ `30_lapack_bug.md`
+- `32_beast` ↔ `32_beast_bug.md`
+- `33_geometry` ↔ `33_geometry_feature.md`
+
+For each task, `setup.sh` copies the prompt file into
+`benchmarks/tasks/$TASK_ID/task.md` (committed) and rewrites any absolute
+paths that referenced `/home/nicolas/source/classifier-repos/worktrees/...`
+to `/scratch` (the in-container workdir).
+
+## Claude Code version
+
+**Installed on host: `claude 2.1.105`**. Pin the image to the same version so
+host and container behavior match:
+```dockerfile
+RUN npm install -g @anthropic-ai/claude-code@2.1.105
+```
+
+## Clean-and-compiled fixture guarantee
+
+Each Claude run must start from a pristine, pre-compiled repo. The pipeline:
+
+1. **`setup.sh` clone step** — for each task, wipe `fixtures/$TASK_ID/` and
+   fresh-clone from `fixture.url @ ref`. Fresh clone = no leftover state from
+   any prior run, staged or unstaged.
+2. **`setup.sh` reset step** — defensive hardening in case a fixture dir
+   already exists or a clone hit an unclean state:
+   ```bash
+   git -C "$fixture_dir" reset --hard
+   git -C "$fixture_dir" clean -fdx
+   git -C "$fixture_dir" checkout "$ref"
+   ```
+3. **`setup.sh` compile step** — spawn a short-lived container (same
+   `benchmark-runner` image) to run `fixture.build_cmd` inside the container,
+   not on the host. This guarantees compile artifacts are ABI-compatible with
+   the runtime container and avoids leaking host toolchain assumptions.
+   ```bash
+   docker run --rm \
+     -v "$REPO/benchmarks/fixtures/$TASK_ID:/work" \
+     --entrypoint bash \
+     benchmark-runner -c "cd /work && $build_cmd"
+   ```
+   The fixture dir now contains source + build artifacts, all on disk.
+4. **`run.sh` run step** — mount fixture **read-only** to `/work`, entrypoint
+   does `cp -a /work/. /scratch/` then runs `claude -p` in `/scratch`.
+   Because `/work` is RO, a misbehaving agent cannot corrupt the canonical
+   state, and `cp -a` gives each run an independent writable copy already
+   in its compiled state.
 
 ## Dockerfile
 
@@ -168,8 +239,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     linux-headers-generic \
     && rm -rf /var/lib/apt/lists/*
 
-# Pin Claude Code version for reproducibility
-RUN npm install -g @anthropic-ai/claude-code@1.0.45
+# Pin Claude Code version for reproducibility (matches host: 2.1.105)
+RUN npm install -g @anthropic-ai/claude-code@2.1.105
 
 # Entry point script that takes a task id, runs claude -p, captures output
 COPY entrypoint.sh /entrypoint.sh
@@ -180,7 +251,6 @@ ENTRYPOINT ["/entrypoint.sh"]
 ```
 
 Notes:
-- `linux-headers-generic` is needed for the minicoro CET reproduction (kernel 6.4+ shadow stack API).
 - Pin `claude-code@1.0.45` — bump deliberately, don't rely on `latest`.
 - Keep the image lean — fixtures are bind-mounted, not baked in.
 - Build once, used by all tasks. ~2 GB image is fine.
@@ -238,8 +308,8 @@ fi
 
 Each task runs in its own ephemeral container. Benefits:
 1. **Fixture isolation by construction** — no `git clean` needed
-2. **Trivial parallelism** — 12 containers in parallel, each gets its own
-   session key in the proxy (proxy keys by first user message; all 12 prompts
+2. **Trivial parallelism** — 10 containers in parallel, each gets its own
+   session key in the proxy (proxy keys by first user message; all 10 prompts
    are different)
 3. **No state leak** — when the task ends, the container dies, FS dies with it
 4. **Session attribution is clean** — proxy logs show exactly which session
@@ -353,25 +423,6 @@ make sqlite3 || exit 1
 diff actual.txt /tasks/04_sqlite_cte/expected.txt
 ```
 
-### `tasks/24_rbtree/verify.sh`
-Runs the rbtree unit test binary:
-```bash
-#!/bin/bash
-SCRATCH=$1
-cd "$SCRATCH"
-make test
-```
-
-### `tasks/27_minicoro_cet/verify.sh`
-Runs the minicoro test binary, expects exit code 0 (no segfault):
-```bash
-#!/bin/bash
-SCRATCH=$1
-cd "$SCRATCH"
-make tests || exit 2  # build failed
-./tests/test_minicoro
-```
-
 For the other 9 tasks, `verify.sh` does not exist. The runner records
 `verify_exit: null` in summary.json. The benchmark conclusion comes from
 turn/duration trend, not pass/fail.
@@ -432,31 +483,6 @@ task                duration off (med)   duration on (med)   delta    nudge fire
 
 ---
 
-## Minicoro task prompt
-
-`benchmarks/tasks/27_minicoro_cet/task.md`:
-
-```markdown
-The minicoro test program in this directory runs successfully on the host
-machine (Ubuntu 25.10, kernel 6.x) but crashes with a segfault when run
-inside the debian:trixie Docker container we are currently in.
-
-Investigate the root cause of the segfault, then fix the crash so that
-running `make tests && ./tests/test_minicoro` inside this container exits
-cleanly with no segfault.
-
-You may modify the minicoro source as needed. The fix should not require
-upgrading the kernel or the C library — it must work in this exact
-container environment.
-```
-
-The verify is "did the test binary exit 0 inside the container?" The agent
-already knows about CET shadow stack (per Nicolas's prior runs with Opus 4.6),
-but it failed to actually fix the crash. This task measures whether the
-nudge can break the agent out of the loop where it diagnoses but doesn't fix.
-
----
-
 ## Output / results format
 
 `benchmarks/results/run_NNN/`:
@@ -497,24 +523,51 @@ evolve without breaking the on-disk format.
 
 ---
 
+## Sanity-check policy (no real Claude runs during harness bring-up)
+
+Running the agent against real tasks costs tokens and time. During the
+harness bring-up, **do not** invoke `claude -p` against the benchmark tasks.
+Instead, prove the plumbing works with cheap surrogates:
+
+1. **Container smoke test** — `docker run --rm benchmark-runner bash -c
+   'python3 -c "print(\"hello world\")" > /tmp/hello.txt && cat /tmp/hello.txt'`.
+   Confirms the image runs, python is available, filesystem is writable.
+2. **Claude CLI presence** — `docker run --rm benchmark-runner claude --version`.
+   Confirms the CLI is installed and launchable. Do NOT make an API call.
+3. **Per-task fixture pipeline** — for each task, run through
+   `setup.sh`'s clone+reset+compile stages and assert at the end:
+   - `git -C fixtures/$TASK_ID status --porcelain` is empty (no stray
+     unstaged or untracked files outside those expected from the build)
+   - build_cmd exit code was 0
+   - the expected build artifacts exist (a task-specific probe file, e.g.
+     `build/gcc/cc1` for GCC, `build/bin/llc` for LLVM)
+4. **Run-step surrogate** — swap the `claude -p` line in `entrypoint.sh`
+   for a trivial script that runs one command against the fixture (e.g.
+   `make --version && ls build/`). Verifies cp-to-scratch, mounts,
+   summary.json emission, and results dir layout — all without burning API
+   credits.
+
+Only after all four pass should a real `--runs 1 --proxy off` pilot be
+launched by the user, explicitly, on the real tasks.
+
 ## Implementation order
 
 1. **`benchmarks/Dockerfile` + `entrypoint.sh`** — build the image, run a
    trivial `echo hello` task to verify the image works
-2. **`benchmarks/manifest.json`** — full 12-task spec, per-task `task.md` and
+2. **`benchmarks/manifest.json`** — full 10-task spec, per-task `task.md` and
    `fixture.json` files (no verify scripts yet)
-3. **`benchmarks/setup.sh`** — fixture clone loop, run it for one task
-   (`24_rbtree`, smallest), verify the fixture lands in
-   `benchmarks/fixtures/24_rbtree/`
-4. **`benchmarks/run.sh`** — single-task path first (`--tasks 24_rbtree`),
+3. **`benchmarks/setup.sh`** — fixture clone loop, run it for one small task
+   (`08_express_async`), verify the fixture lands in
+   `benchmarks/fixtures/08_express_async/`
+4. **`benchmarks/run.sh`** — single-task path first (`--tasks 08_express_async`),
    subscription auth only, no proxy, no parallelism. Verify the container
    runs claude -p end-to-end and produces summary.json
 5. **Add proxy startup/teardown** to run.sh, verify proxy session shows up
    in `~/.stuck-detector/logs/events-*.jsonl`
-6. **Add parallelism** — 2-task parallel test, then full 12
+6. **Add parallelism** — 2-task parallel test, then full 10
 7. **Add `--auth env` mode**, test with a dummy API key in `.env`
-8. **Write the 3 verify.sh scripts** (sqlite, rbtree, minicoro)
-9. **Run setup.sh** for all 12 fixtures
+8. **Write the verify.sh script** (sqlite only)
+9. **Run setup.sh** for all 10 fixtures
 10. **First real benchmark**: `--runs 3 --proxy off` baseline, then
     `--runs 3 --proxy on`
 11. **`benchmarks/compare.py`** — table output
@@ -536,8 +589,7 @@ Each step is a single small commit. Don't batch.
 4. `python benchmarks/compare.py results/run_001 results/run_002` prints a
    table comparing off vs on
 5. README.md explains how to run the benchmark from a clean checkout
-6. The 3 stuck-prone "trivially verifiable" tasks (sqlite, rbtree, minicoro)
-   produce a `verify_*.json` exit code
+6. The sqlite "trivially verifiable" task produces a `verify_*.json` exit code
 
 That's it. No claims about whether the nudge actually helps until v1 is
 running and we have data.
@@ -551,8 +603,8 @@ running and we have data.
   measurement.
 - **Don't add features to the manifest schema** beyond what's specified here.
   YAGNI — extend later when there's a real need.
-- **Don't try to make verify scripts for all 12 tasks**. The 3 specified are
-  enough for v1.
+- **Don't try to make verify scripts for all 10 tasks**. The one specified
+  (sqlite) is enough for v1.
 - **Don't bake fixtures into the Docker image**. Bind-mounted with cp-to-scratch
   is the right pattern.
 - **Don't run tasks sequentially "to be safe"**. Parallel-by-container is

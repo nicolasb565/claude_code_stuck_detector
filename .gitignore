@@ -27,3 +27,8 @@ proxy/test/mlp_parity_vectors.json
 # Training experiment outputs (reproducible via train.py with flags)
 proxy/experiments/
 .env
+
+# Benchmark harness: fixtures cloned/compiled on demand, results per-run.
+benchmarks/fixtures/
+benchmarks/results/
+benchmarks/.env
